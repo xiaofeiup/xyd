@@ -18,9 +18,9 @@ from pathlib import Path
 sys.path.append('model_tools')
 
 # 导入测试模块
-from model_tools.metric_report.psi import calculate_psi, calculate_multi_feature_psi, generate_psi_report
-from model_tools.model_monitor import ModelStabilityMonitor
-from model_tools.alerting_workflow import AutomatedMonitoringWorkflow, create_default_config
+from metric_report.psi import calculate_psi, calculate_multi_feature_psi, generate_psi_report
+from model_monitor import ModelStabilityMonitor
+from alerting_workflow import AutomatedMonitoringWorkflow, create_default_config
 
 
 def create_sample_data():
