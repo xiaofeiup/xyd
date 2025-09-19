@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Black">
+    <option name="sdkName" value="job_310" />
+  </component>
+  <component name="GitLabMergeRequestsSettings"><![CDATA[{}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{}]]></component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="job_310" project-jdk-type="Python SDK" />
+  <component name="editorHistoryManager">
+    <entry file="jupyter-remote://47.253.62.54:8000/featurelib/feature_set/sms/utils/sender_word_utils/__init__.py" />
+    <entry file="jupyter-remote://47.253.62.54:8000/featurelib/feature_set/app/utils/app_overduerate_utils/feature_calc_utils.py">
+      <provider selected="true" editor-type-id="text-editor" />
+    </entry>
+    <entry file="jupyter-remote://47.253.62.54:8000/featurelib/feature_set/app/utils/app_overduerate_utils/app_utils.py">
+      <provider selected="true" editor-type-id="text-editor" />
+    </entry>
+    <entry file="jupyter-remote://47.253.62.54:8000/featurelib/feature_set/call/utils/call_overduerate_utils/__init__.py">
+      <provider selected="true" editor-type-id="text-editor" />
+    </entry>
+    <entry file="jupyter-remote://47.253.62.54:8000/featurelib/feature_set/call/utils/call_overduerate_utils/call_utils.py">
+      <provider selected="true" editor-type-id="text-editor" />
+    </entry>
+    <entry file="jupyter-remote://47.253.62.54:8000/featurelib/feature_set/call/utils/call_overduerate_utils/feature_calc_utils.py">
+      <provider selected="true" editor-type-id="text-editor" />
+    </entry>
+  </component>
+</project>
