@@ -25,6 +25,24 @@ from .config import (
     load_global_config
 )
 
+from .roi_calculator import (
+    CreditMetrics,
+    CreditROICalculator,
+    batch_roi_analysis
+)
+
+from .decorators import (
+    timer,
+    retry,
+    validate_inputs,
+    cache_result,
+    log_calls,
+    deprecated,
+    monitor_performance,
+    rate_limit,
+    ml_function
+)
+
 __all__ = [
     # 数据处理
     'check_data_quality',
@@ -43,5 +61,21 @@ __all__ = [
     'load_config_with_env',
     'get_config',
     'set_config',
-    'load_global_config'
+    'load_global_config',
+
+    # ROI计算
+    'CreditMetrics',
+    'CreditROICalculator',
+    'batch_roi_analysis',
+
+    # 装饰器
+    'timer',
+    'retry',
+    'validate_inputs',
+    'cache_result',
+    'log_calls',
+    'deprecated',
+    'monitor_performance',
+    'rate_limit',
+    'ml_function'
 ]

@@ -8,7 +8,11 @@ import pandas as pd
 import numpy as np
 import warnings
 from typing import Dict, List, Optional, Tuple, Union
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import (
+    roc_auc_score, mean_squared_error, mean_absolute_error,
+    r2_score, explained_variance_score, median_absolute_error,
+    max_error, mean_absolute_percentage_error
+)
 
 
 def calculate_auc(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -504,3 +508,426 @@ class ModelEvaluator:
         comparison_df = comparison_df.sort_values('auc', ascending=False)
 
         return comparison_df
+
+
+# ================== 回归模型评估指标 ==================
+
+def calculate_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    计算均方根误差 (Root Mean Square Error)
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+
+    Returns:
+    --------
+    rmse : float
+        RMSE值
+    """
+    return np.sqrt(mean_squared_error(y_true, y_pred))
+
+
+def calculate_mse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    计算均方误差 (Mean Square Error)
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+
+    Returns:
+    --------
+    mse : float
+        MSE值
+    """
+    return mean_squared_error(y_true, y_pred)
+
+
+def calculate_mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    计算平均绝对误差 (Mean Absolute Error)
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+
+    Returns:
+    --------
+    mae : float
+        MAE值
+    """
+    return mean_absolute_error(y_true, y_pred)
+
+
+def calculate_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    计算决定系数 (R-squared)
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+
+    Returns:
+    --------
+    r2 : float
+        R²值
+    """
+    return r2_score(y_true, y_pred)
+
+
+def calculate_adjusted_r2(y_true: np.ndarray, y_pred: np.ndarray, n_features: int) -> float:
+    """
+    计算调整R² (Adjusted R-squared)
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+    n_features : int
+        特征数量
+
+    Returns:
+    --------
+    adj_r2 : float
+        调整R²值
+    """
+    n = len(y_true)
+    r2 = r2_score(y_true, y_pred)
+
+    if n <= n_features + 1:
+        return np.nan
+
+    adj_r2 = 1 - (1 - r2) * (n - 1) / (n - n_features - 1)
+    return adj_r2
+
+
+def calculate_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    计算平均绝对百分比误差 (Mean Absolute Percentage Error)
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+
+    Returns:
+    --------
+    mape : float
+        MAPE值 (百分比形式)
+    """
+    # 避免除零错误
+    mask = y_true != 0
+    if not np.any(mask):
+        warnings.warn("所有真实值为0，无法计算MAPE")
+        return np.inf
+
+    return mean_absolute_percentage_error(y_true[mask], y_pred[mask]) * 100
+
+
+def calculate_smape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    计算对称平均绝对百分比误差 (Symmetric Mean Absolute Percentage Error)
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+
+    Returns:
+    --------
+    smape : float
+        SMAPE值 (百分比形式)
+    """
+    denominator = (np.abs(y_true) + np.abs(y_pred)) / 2
+    mask = denominator != 0
+
+    if not np.any(mask):
+        warnings.warn("所有值接近0，无法计算SMAPE")
+        return 0.0
+
+    smape = np.mean(np.abs(y_true[mask] - y_pred[mask]) / denominator[mask]) * 100
+    return smape
+
+
+def calculate_rmsle(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """
+    计算均方根对数误差 (Root Mean Square Logarithmic Error)
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+
+    Returns:
+    --------
+    rmsle : float
+        RMSLE值
+    """
+    # 确保所有值为正数
+    if np.any(y_true < 0) or np.any(y_pred < 0):
+        warnings.warn("RMSLE要求所有值为非负数")
+        return np.nan
+
+    log_true = np.log1p(y_true)
+    log_pred = np.log1p(y_pred)
+    return np.sqrt(mean_squared_error(log_true, log_pred))
+
+
+def calculate_huber_loss(y_true: np.ndarray, y_pred: np.ndarray, delta: float = 1.0) -> float:
+    """
+    计算Huber损失
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+    delta : float, default=1.0
+        阈值参数
+
+    Returns:
+    --------
+    huber_loss : float
+        Huber损失值
+    """
+    residual = np.abs(y_true - y_pred)
+    condition = residual <= delta
+
+    loss = np.where(condition,
+                   0.5 * residual**2,
+                   delta * residual - 0.5 * delta**2)
+
+    return np.mean(loss)
+
+
+def calculate_quantile_loss(y_true: np.ndarray, y_pred: np.ndarray, quantile: float = 0.5) -> float:
+    """
+    计算分位数损失
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+    quantile : float, default=0.5
+        分位数 (0-1之间)
+
+    Returns:
+    --------
+    quantile_loss : float
+        分位数损失值
+    """
+    if not 0 <= quantile <= 1:
+        raise ValueError("分位数必须在0-1之间")
+
+    residual = y_true - y_pred
+    loss = np.where(residual >= 0,
+                   quantile * residual,
+                   (quantile - 1) * residual)
+
+    return np.mean(loss)
+
+
+def calculate_regression_residuals(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, np.ndarray]:
+    """
+    计算回归残差统计
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+
+    Returns:
+    --------
+    residual_stats : dict
+        残差统计信息
+    """
+    residuals = y_true - y_pred
+
+    return {
+        'residuals': residuals,
+        'abs_residuals': np.abs(residuals),
+        'squared_residuals': residuals**2,
+        'standardized_residuals': residuals / np.std(residuals) if np.std(residuals) != 0 else residuals,
+        'mean_residual': np.mean(residuals),
+        'std_residual': np.std(residuals),
+        'min_residual': np.min(residuals),
+        'max_residual': np.max(residuals),
+        'residual_skewness': _calculate_skewness(residuals),
+        'residual_kurtosis': _calculate_kurtosis(residuals)
+    }
+
+
+def _calculate_skewness(data: np.ndarray) -> float:
+    """计算偏度"""
+    n = len(data)
+    if n < 3:
+        return np.nan
+
+    mean_val = np.mean(data)
+    std_val = np.std(data)
+
+    if std_val == 0:
+        return 0.0
+
+    skewness = np.mean(((data - mean_val) / std_val) ** 3)
+    return skewness
+
+
+def _calculate_kurtosis(data: np.ndarray) -> float:
+    """计算峰度"""
+    n = len(data)
+    if n < 4:
+        return np.nan
+
+    mean_val = np.mean(data)
+    std_val = np.std(data)
+
+    if std_val == 0:
+        return 0.0
+
+    kurtosis = np.mean(((data - mean_val) / std_val) ** 4) - 3
+    return kurtosis
+
+
+def evaluate_regression_model(y_true: np.ndarray,
+                            y_pred: np.ndarray,
+                            n_features: Optional[int] = None,
+                            model_name: str = "Regression Model") -> Dict[str, any]:
+    """
+    回归模型综合评估
+
+    Parameters:
+    -----------
+    y_true : array-like
+        真实值
+    y_pred : array-like
+        预测值
+    n_features : int, optional
+        特征数量，用于计算调整R²
+    model_name : str, default="Regression Model"
+        模型名称
+
+    Returns:
+    --------
+    evaluation_result : dict
+        评估结果字典
+    """
+    # 基础指标
+    mse = calculate_mse(y_true, y_pred)
+    rmse = calculate_rmse(y_true, y_pred)
+    mae = calculate_mae(y_true, y_pred)
+    r2 = calculate_r2(y_true, y_pred)
+
+    # 高级指标
+    mape = calculate_mape(y_true, y_pred)
+    smape = calculate_smape(y_true, y_pred)
+
+    # 残差分析
+    residual_stats = calculate_regression_residuals(y_true, y_pred)
+
+    # 其他指标
+    explained_var = explained_variance_score(y_true, y_pred)
+    median_ae = median_absolute_error(y_true, y_pred)
+    max_err = max_error(y_true, y_pred)
+
+    # 调整R²（如果提供特征数量）
+    adj_r2 = None
+    if n_features is not None:
+        adj_r2 = calculate_adjusted_r2(y_true, y_pred, n_features)
+
+    result = {
+        'model_name': model_name,
+        'basic_metrics': {
+            'mse': mse,
+            'rmse': rmse,
+            'mae': mae,
+            'r2': r2,
+            'adjusted_r2': adj_r2,
+            'explained_variance': explained_var
+        },
+        'percentage_metrics': {
+            'mape': mape,
+            'smape': smape
+        },
+        'robust_metrics': {
+            'median_absolute_error': median_ae,
+            'max_error': max_err,
+            'huber_loss': calculate_huber_loss(y_true, y_pred)
+        },
+        'residual_analysis': residual_stats,
+        'sample_info': {
+            'total_samples': len(y_true),
+            'y_true_mean': np.mean(y_true),
+            'y_true_std': np.std(y_true),
+            'y_pred_mean': np.mean(y_pred),
+            'y_pred_std': np.std(y_pred),
+            'prediction_range': (np.min(y_pred), np.max(y_pred)),
+            'actual_range': (np.min(y_true), np.max(y_true))
+        }
+    }
+
+    return result
+
+
+def compare_regression_models(model_results: List[Dict]) -> pd.DataFrame:
+    """
+    比较多个回归模型
+
+    Parameters:
+    -----------
+    model_results : list
+        模型评估结果列表
+
+    Returns:
+    --------
+    comparison_df : pd.DataFrame
+        模型比较结果
+    """
+    comparison_data = []
+
+    for result in model_results:
+        basic_metrics = result['basic_metrics']
+        percentage_metrics = result['percentage_metrics']
+
+        comparison_data.append({
+            'model_name': result['model_name'],
+            'rmse': basic_metrics['rmse'],
+            'mae': basic_metrics['mae'],
+            'r2': basic_metrics['r2'],
+            'adjusted_r2': basic_metrics.get('adjusted_r2'),
+            'mape': percentage_metrics['mape'],
+            'smape': percentage_metrics['smape'],
+            'explained_variance': basic_metrics['explained_variance']
+        })
+
+    comparison_df = pd.DataFrame(comparison_data)
+    # 按R²降序排列
+    comparison_df = comparison_df.sort_values('r2', ascending=False)
+
+    return comparison_df

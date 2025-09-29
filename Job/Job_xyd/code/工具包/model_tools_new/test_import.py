@@ -99,7 +99,12 @@ def test_basic_functionality():
         # 核心类实例化
         print('🏗️  核心类实例化...')
         evaluator = mt.ModelEvaluator('test')
+        evla = evaluator.evaluate_binary_classification(df['f1'], df['target'])
+        print(evla)
         monitor = mt.ModelStabilityMonitor('test')
+        monitor_history = monitor.get_performance_history()
+        print(monitor_history)
+        monitor_compare = monitor.compare_with_baseline(df['f1'], df['target'], 0.5, 0.5)
         drift_detector = mt.FeatureDriftDetector(['f1', 'f2'])
         alert_manager = mt.AlertManager({'enable_log': True})
         selector = mt.FeatureSelector()

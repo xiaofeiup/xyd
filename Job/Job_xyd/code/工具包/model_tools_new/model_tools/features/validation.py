@@ -405,6 +405,7 @@ class FeatureValidator:
             'null_count': series.isnull().sum(),
             'null_percentage': series.isnull().mean(),
             'unique_count': series.nunique(),
+            'value_count_num1': series.value_counts(dropna=False).iloc[0] / len(series) if len(series) > 0 else 0,
             'unique_percentage': series.nunique() / len(series) if len(series) > 0 else 0
         }
 
@@ -420,8 +421,8 @@ class FeatureValidator:
                     'median': numeric_series.median(),
                     'q25': numeric_series.quantile(0.25),
                     'q75': numeric_series.quantile(0.75),
-                    'skewness': numeric_series.skew(),
-                    'kurtosis': numeric_series.kurtosis()
+                    'skewness': numeric_series.skew(), # 偏度，描述数据分布的偏斜程度
+                    'kurtosis': numeric_series.kurtosis() # 峰度，描述数据分布的峰态
                 })
 
         return stats

@@ -40,6 +40,7 @@ from . import evaluation
 from . import monitoring
 from . import features
 from . import utils
+from . import optimization
 
 # 评估模块的快捷导入
 from .evaluation.metrics import (
@@ -105,6 +106,23 @@ from .utils.decorators import (
     ml_function
 )
 
+# 超参数优化模块的快捷导入
+from .optimization.hyperparameter_tuner import (
+    HyperparameterTuner,
+    create_lgb_tuner,
+    create_xgb_tuner
+)
+from .optimization.objectives import (
+    AUCObjective,
+    KSObjective,
+    BusinessROIObjective,
+    create_credit_scoring_objective
+)
+from .optimization.parameter_spaces import (
+    get_parameter_space,
+    CreditScoringSpace
+)
+
 __all__ = [
     # 版本和元信息
     '__version__',
@@ -116,6 +134,7 @@ __all__ = [
     'monitoring',
     'features',
     'utils',
+    'optimization',
 
     # 评估功能
     'calculate_auc',
@@ -164,6 +183,17 @@ __all__ = [
     'monitor_performance',
     'rate_limit',
     'ml_function',
+
+    # 超参数优化
+    'HyperparameterTuner',
+    'create_lgb_tuner',
+    'create_xgb_tuner',
+    'AUCObjective',
+    'KSObjective',
+    'BusinessROIObjective',
+    'create_credit_scoring_objective',
+    'get_parameter_space',
+    'CreditScoringSpace',
 
     # 元函数
     'get_version',
@@ -218,7 +248,16 @@ def get_module_info():
                 'submodules': {
                     'data_processing': '数据质量检查',
                     'config': '配置管理',
-                    'decorators': '实用装饰器'
+                    'decorators': '实用装饰器',
+                    'roi_calculator': '信贷ROI计算工具'
+                }
+            },
+            'optimization': {
+                'description': '智能超参数优化和模型调优',
+                'submodules': {
+                    'hyperparameter_tuner': 'Optuna驱动的超参数优化器',
+                    'parameter_spaces': '考虑约束关系的参数空间定义',
+                    'objectives': '多样化的优化目标函数'
                 }
             }
         },
@@ -226,7 +265,9 @@ def get_module_info():
             'data_quality': 'mt.check_data_quality(data, target_col="target")',
             'feature_selection': 'mt.FeatureSelector(method="iv").fit_transform(X, y)',
             'model_evaluation': 'mt.calculate_auc(y_true, y_scores)',
-            'model_monitoring': 'mt.ModelStabilityMonitor("model").monitor_performance(y, y_pred)'
+            'model_monitoring': 'mt.ModelStabilityMonitor("model").monitor_performance(y, y_pred)',
+            'hyperparameter_tuning': 'mt.create_lgb_tuner(LGBMClassifier).optimize(X, y, n_trials=100)',
+            'roi_calculation': 'mt.BusinessROIObjective(loan_amounts)(y_true, y_pred)'
         }
     }
 
