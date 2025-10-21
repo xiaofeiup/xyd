@@ -227,7 +227,19 @@ class FeatureValidator:
         # 计算相关性矩阵
         try:
             numeric_features = features.select_dtypes(include=[np.number])
-            if len(numeric_features.columns) > 1:
+            n_features = len(numeric_features.columns)
+
+            # 检查特征数量是否超过阈值
+            max_features = self.config.get('max_features_for_correlation', 500)
+
+            if n_features > max_features:
+                self.logger.info(f"特征数量({n_features})超过阈值({max_features}),跳过特征间相关性计算以节省时间")
+                correlation_report['skipped'] = True
+                correlation_report['reason'] = f'特征数量({n_features})超过阈值({max_features})'
+                correlation_report['n_features'] = n_features
+                return correlation_report
+
+            if n_features > 1:
                 corr_matrix = numeric_features.corr()
                 correlation_report['correlation_matrix'] = corr_matrix.to_dict()
 
@@ -238,7 +250,7 @@ class FeatureValidator:
                 correlation_report['high_correlation_pairs'] = high_corr_pairs
 
                 # 计算VIF（方差膨胀因子）
-                if len(numeric_features.columns) <= 20:  # 限制计算量
+                if n_features <= 20:  # 限制计算量
                     vif_scores = self._calculate_vif_scores(numeric_features)
                     correlation_report['vif_scores'] = vif_scores
 
@@ -394,7 +406,8 @@ class FeatureValidator:
             'vif_threshold': 10.0,  # VIF阈值
             'outlier_threshold': 3.0,  # 异常值阈值（Z-score）
             'stability_threshold': 0.7,  # 稳定性阈值
-            'min_predictive_power': 0.01  # 最小预测能力
+            'min_predictive_power': 0.01,  # 最小预测能力
+            'max_features_for_correlation': 500  # 执行特征间相关性计算的最大特征数
         }
 
     def _calculate_basic_stats(self, series: pd.Series) -> Dict:
