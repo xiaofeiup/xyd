@@ -55,8 +55,8 @@ class AntiOverfittingTuner(HyperparameterTuner):
         self.max_auc_gap = max_auc_gap
         self.max_ks_gap = max_ks_gap
         self.overfitting_penalty_weight = overfitting_penalty_weight
-        self.use_regularization_focused_space = use_regularization_focused_space
         self.early_stopping_patience = early_stopping_patience
+        self.parameter_mode = 'anti_overfitting' if use_regularization_focused_space else 'default'
 
         # 性能追踪
         self.performance_history_ = []
@@ -66,83 +66,9 @@ class AntiOverfittingTuner(HyperparameterTuner):
         self.ks_objective = KSObjective()
         self.auc_objective = AUCObjective()
 
-    def _get_regularization_focused_params(self, trial):
-        """获取正则化导向的参数空间"""
-
-        if self.model_type == 'lgb':
-            # LightGBM正则化参数
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 50, 200),  # 较少的树
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.15),  # 较低学习率
-                'max_depth': trial.suggest_int('max_depth', 3, 8),  # 较浅深度
-
-                # 正则化参数
-                'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 10.0),  # L1正则
-                'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 10.0),  # L2正则
-                'min_child_samples': trial.suggest_int('min_child_samples', 20, 100),  # 较高最小样本
-                'min_child_weight': trial.suggest_float('min_child_weight', 0.001, 10.0),
-
-                # 特征和数据采样
-                'subsample': trial.suggest_float('subsample', 0.6, 0.9),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),
-                'subsample_freq': 1,
-
-                # 防过拟合设置
-                'random_state': 42,
-                'verbosity': -1,
-                'force_row_wise': True,
-                'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0)
-            }
-
-            # 叶子数限制
-            max_leaves_upper = max(10, int(2**params['max_depth'] * 0.6))  # 更保守
-            params['num_leaves'] = trial.suggest_int('num_leaves', 10, min(100, max_leaves_upper))
-
-        elif self.model_type == 'xgb':
-            # XGBoost正则化参数
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 50, 200),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.15),
-                'max_depth': trial.suggest_int('max_depth', 3, 8),
-
-                # 正则化参数
-                'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 10.0),
-                'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 10.0),
-                'min_child_weight': trial.suggest_float('min_child_weight', 1, 10),
-                'gamma': trial.suggest_float('gamma', 0.0, 5.0),
-
-                # 采样参数
-                'subsample': trial.suggest_float('subsample', 0.6, 0.9),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.9),
-
-                'random_state': 42,
-                'verbosity': 0
-            }
-
-        elif self.model_type == 'rf':
-            # Random Forest防过拟合参数
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 50, 200),
-                'max_depth': trial.suggest_int('max_depth', 3, 10),
-                'min_samples_split': trial.suggest_int('min_samples_split', 20, 100),
-                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 10, 50),
-                'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', 0.5, 0.7]),
-                'max_samples': trial.suggest_float('max_samples', 0.7, 0.95),
-                'random_state': 42
-            }
-
-        else:
-            # 默认使用父类参数（但减少复杂度）
-            params = super()._suggest_parameters(trial)
-
-        return params
-
     def _suggest_parameters(self, trial):
-        """选择参数空间"""
-        if self.use_regularization_focused_space:
-            return self._get_regularization_focused_params(trial)
-        else:
-            return super()._suggest_parameters(trial)
+        """统一走 parameter_spaces.py 的单一参数空间入口"""
+        return super()._suggest_parameters(trial)
 
     def _calculate_performance_gap(self, train_score: float, val_score: float, metric_type: str) -> float:
         """计算性能差距"""
@@ -186,7 +112,8 @@ class AntiOverfittingTuner(HyperparameterTuner):
         n_trials: int = 100,
         cv_folds: int = 5,
         n_jobs: int = 1,
-        show_progress_bar: bool = True
+        show_progress_bar: bool = True,
+        weight_col: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         执行防过拟合优化（使用纯交叉验证）
@@ -199,6 +126,7 @@ class AntiOverfittingTuner(HyperparameterTuner):
             cv_folds: 交叉验证折数
             n_jobs: 并行数
             show_progress_bar: 是否显示进度条
+            weight_col: 权重列名，如果传入则使用该列作为样本权重
 
         Returns:
             优化结果字典
@@ -207,8 +135,18 @@ class AntiOverfittingTuner(HyperparameterTuner):
         if objective_function is None:
             objective_function = self.auc_objective
 
-        # 设置交叉验证
-        cv_splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+        # 提取权重列
+        if weight_col is not None:
+            if isinstance(X, pd.DataFrame) and weight_col in X.columns:
+                sample_weight = X[weight_col].values
+                X = X.drop(columns=[weight_col])
+            else:
+                raise ValueError(f"weight_col '{weight_col}' not found in X")
+        else:
+            sample_weight = None
+
+        # 设置交叉验证（不固定random_state以获得真实的交叉验证效果）
+        cv_splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True)
 
         def objective(trial):
             try:
@@ -240,9 +178,15 @@ class AntiOverfittingTuner(HyperparameterTuner):
                         y_train_fold = y[train_idx]
                         y_val_fold = y[val_idx]
 
+                    # 获取权重
+                    if sample_weight is not None:
+                        weight_train_fold = sample_weight[train_idx]
+                    else:
+                        weight_train_fold = None
+
                     # 训练模型
                     model = self.model_class(**params)
-                    model.fit(X_train_fold, y_train_fold)
+                    model.fit(X_train_fold, y_train_fold, sample_weight=weight_train_fold)
 
                     # 预测
                     y_pred_train_fold = model.predict_proba(X_train_fold)[:, 1]

@@ -80,36 +80,90 @@ class ModelDeliveryReport:
         except:
             return np.nan
 
-    def _create_bins(self, data: pd.Series, bins: int = 10, bin_method: str = 'quantile', retbins: bool = False):
+    def _create_bins(self, data: pd.Series, bins: int = 10, bin_method: str = 'quantile', 
+                     retbins: bool = False, handle_missing: bool = True):
         """
-        创建分箱的通用函数
+        创建分箱的通用函数，支持缺失值单独划为一箱
 
         Args:
             data: 需要分箱的数据
             bins: 分箱数量
             bin_method: 分箱方式，'quantile'(等频分箱)或'equal'(等距分箱)
             retbins: 是否返回分箱边界
+            handle_missing: 是否将缺失值单独划为一箱（默认True）
 
         Returns:
             分箱结果和边界（如果retbins=True）
         """
-        if bin_method == 'quantile':
-            try:
+        # 检查是否有缺失值
+        has_missing = data.isna().any()
+        
+        if handle_missing and has_missing:
+            # 分离缺失值和非缺失值
+            non_missing_mask = data.notna()
+            non_missing_data = data[non_missing_mask]
+            
+            # 对非缺失值进行分箱
+            if bin_method == 'quantile':
+                try:
+                    if retbins:
+                        binned_non_missing, bin_edges = pd.qcut(non_missing_data, q=bins, retbins=True, duplicates='drop')
+                    else:
+                        binned_non_missing = pd.qcut(non_missing_data, q=bins, duplicates='drop')
+                        bin_edges = None
+                except ValueError:
+                    # 如果等频分箱失败，回退到等距分箱
+                    if retbins:
+                        binned_non_missing, bin_edges = pd.cut(non_missing_data, bins=bins, retbins=True, duplicates='drop')
+                    else:
+                        binned_non_missing = pd.cut(non_missing_data, bins=bins, duplicates='drop')
+                        bin_edges = None
+            else:  # equal
                 if retbins:
-                    return pd.qcut(data, q=bins, retbins=True, duplicates='drop')
+                    binned_non_missing, bin_edges = pd.cut(non_missing_data, bins=bins, retbins=True, duplicates='drop')
                 else:
-                    return pd.qcut(data, q=bins, duplicates='drop')
-            except ValueError:
-                # 如果等频分箱失败，回退到等距分箱
+                    binned_non_missing = pd.cut(non_missing_data, bins=bins, duplicates='drop')
+                    bin_edges = None
+            
+            # 创建新的分类，包含缺失值类别
+            categories = list(binned_non_missing.cat.categories)
+            missing_category = pd.Interval(-np.inf, -np.inf)  # 创建一个特殊的区间表示缺失值
+            
+            # 使用字符串类别代替区间，方便处理缺失值
+            str_categories = [str(cat) for cat in categories] + ['Missing']
+            
+            # 创建结果Series
+            result = pd.Series(index=data.index, dtype='object')
+            result[non_missing_mask] = binned_non_missing.astype(str)
+            result[~non_missing_mask] = 'Missing'
+            
+            # 转换为Categorical类型
+            result = pd.Categorical(result, categories=str_categories, ordered=True)
+            result = pd.Series(result, index=data.index)
+            
+            if retbins:
+                return result, bin_edges
+            else:
+                return result
+        else:
+            # 原有逻辑（无缺失值或不处理缺失值）
+            if bin_method == 'quantile':
+                try:
+                    if retbins:
+                        return pd.qcut(data, q=bins, retbins=True, duplicates='drop')
+                    else:
+                        return pd.qcut(data, q=bins, duplicates='drop')
+                except ValueError:
+                    # 如果等频分箱失败，回退到等距分箱
+                    if retbins:
+                        return pd.cut(data, bins=bins, retbins=True, duplicates='drop')
+                    else:
+                        return pd.cut(data, bins=bins, duplicates='drop')
+            else:  # equal
                 if retbins:
                     return pd.cut(data, bins=bins, retbins=True, duplicates='drop')
                 else:
                     return pd.cut(data, bins=bins, duplicates='drop')
-        else:  # equal
-            if retbins:
-                return pd.cut(data, bins=bins, retbins=True, duplicates='drop')
-            else:
-                return pd.cut(data, bins=bins, duplicates='drop')
 
     def _calculate_iv(self, feature: pd.Series, target: pd.Series, bins: int = 10) -> float:
         """计算IV值"""
@@ -141,6 +195,195 @@ class ModelDeliveryReport:
             return iv
         except:
             return np.nan
+
+    def _calculate_feature_importance(self, features: List[str], 
+                                      model: Any = None,
+                                      importance_type: str = 'gain') -> Dict[str, float]:
+        """
+        计算特征重要性
+
+        Args:
+            features: 特征列名列表
+            model: 可选，用于计算特征重要性的模型
+                   - 支持LightGBM, XGBoost, CatBoost, sklearn树模型
+                   - 如果为None，则使用IV计算
+            importance_type: 特征重要性类型
+                   - 对于LightGBM: 'gain', 'split'
+                   - 对于XGBoost: 'gain', 'weight', 'cover', 'total_gain', 'total_cover'
+                   - 对于sklearn树模型: 仅使用feature_importances_
+
+        Returns:
+            特征重要性字典 {feature_name: importance_value}
+        """
+        feature_gains = {}
+
+        if model is not None:
+            # 使用模型计算特征重要性
+            try:
+                model_features = self._get_model_features(model, features)
+                
+                # 检查模型类型并获取重要性
+                model_type = type(model).__name__
+                
+                if 'LGBMClassifier' in model_type or 'LGBMRegressor' in model_type or 'Booster' in model_type:
+                    # LightGBM模型
+                    if hasattr(model, 'booster_'):
+                        # sklearn接口
+                        importance = model.booster_.feature_importance(importance_type=importance_type)
+                        feature_names_model = model.booster_.feature_name()
+                    elif hasattr(model, 'feature_importance'):
+                        # 原生Booster
+                        importance = model.feature_importance(importance_type=importance_type)
+                        feature_names_model = model.feature_name()
+                    else:
+                        # 使用feature_importances_
+                        importance = model.feature_importances_
+                        feature_names_model = model_features
+                        
+                elif 'XGBClassifier' in model_type or 'XGBRegressor' in model_type or 'Booster' in model_type:
+                    # XGBoost模型
+                    if hasattr(model, 'get_booster'):
+                        booster = model.get_booster()
+                        importance_dict = booster.get_score(importance_type=importance_type)
+                        for feat in features:
+                            if feat in self.data.columns:
+                                feature_gains[feat] = importance_dict.get(feat, 0)
+                        return feature_gains
+                    elif hasattr(model, 'feature_importances_'):
+                        importance = model.feature_importances_
+                        feature_names_model = model_features
+                    else:
+                        raise ValueError(f"无法从XGBoost模型获取特征重要性")
+                        
+                elif 'CatBoost' in model_type:
+                    # CatBoost模型
+                    importance = model.get_feature_importance()
+                    feature_names_model = model.feature_names_ if hasattr(model, 'feature_names_') else model_features
+                    
+                elif hasattr(model, 'feature_importances_'):
+                    # sklearn树模型 (RandomForest, GradientBoosting, etc.)
+                    importance = model.feature_importances_
+                    feature_names_model = model_features
+                    
+                else:
+                    raise ValueError(f"不支持的模型类型: {model_type}")
+
+                # 构建特征重要性字典
+                importance_dict = dict(zip(feature_names_model, importance))
+                for feat in features:
+                    if feat in self.data.columns:
+                        feature_gains[feat] = importance_dict.get(feat, 0)
+                        
+            except Exception as e:
+                warnings.warn(f"使用模型计算特征重要性失败: {e}，回退到IV计算")
+                model = None
+
+        if model is None:
+            # 使用IV计算特征重要性
+            for feature in features:
+                if feature not in self.data.columns:
+                    continue
+                try:
+                    iv = self._calculate_iv(self.data[feature], self.data[self.target_col])
+                    feature_gains[feature] = iv if not pd.isna(iv) else 0
+                except:
+                    feature_gains[feature] = 0
+
+        return feature_gains
+
+    def _get_model_features(self, model: Any, default_features: List[str]) -> List[str]:
+        """获取模型使用的特征名称"""
+        if hasattr(model, 'feature_name_'):
+            return model.feature_name_
+        elif hasattr(model, 'feature_names_'):
+            return model.feature_names_
+        elif hasattr(model, 'feature_names_in_'):
+            return list(model.feature_names_in_)
+        elif hasattr(model, 'booster_') and hasattr(model.booster_, 'feature_name'):
+            return model.booster_.feature_name()
+        elif hasattr(model, 'get_booster'):
+            return model.get_booster().feature_names
+        else:
+            return default_features
+
+    def _apply_alternating_fill(self, ws, df: pd.DataFrame, blue_fill, white_fill):
+        """
+        对工作表应用蓝白交替填充，根据分组列区分不同类别
+        
+        Args:
+            ws: openpyxl worksheet对象
+            df: 数据框
+            blue_fill: 蓝色填充样式
+            white_fill: 白色填充样式
+        """
+        # 定义需要进行分组填充的列（按优先级排序）
+        group_columns = ['样本类型', '特征', '指标英文','指标中文']
+        
+        # 找到第一个存在的分组列
+        group_col = None
+        group_col_idx = None
+        for col in group_columns:
+            if col in df.columns:
+                group_col = col
+                group_col_idx = df.columns.get_loc(col) + 1  # openpyxl列索引从1开始
+                break
+        
+        if group_col is None:
+            return  # 没有需要分组的列
+        
+        # 获取该列的值，追踪分组变化
+        col_values = df[group_col].tolist()
+        
+        # 计算每行应该使用的填充颜色
+        current_fill = blue_fill
+        prev_value = None
+        row_fills = []
+        
+        for value in col_values:
+            if prev_value is not None and value != prev_value:
+                # 值发生变化，切换颜色
+                current_fill = white_fill if current_fill == blue_fill else blue_fill
+            row_fills.append(current_fill)
+            prev_value = value
+        
+        # 应用填充颜色到所有单元格（跳过表头，从第2行开始）
+        max_col = len(df.columns)
+        for row_idx, fill in enumerate(row_fills, start=2):  # Excel行从1开始，表头占第1行
+            for col_idx in range(1, max_col + 1):
+                ws.cell(row=row_idx, column=col_idx).fill = fill
+
+    def _convert_numeric_strings(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        将DataFrame中的数字字符串转换为真正的数字类型
+        
+        Args:
+            df: 输入的数据框
+            
+        Returns:
+            转换后的数据框
+        """
+        df_copy = df.copy()
+        
+        for col in df_copy.columns:
+            # 跳过明显不是数字的列
+            if col in ['分箱', 'score_bin', '概率范围', 'Month']:
+                continue
+                
+            # 尝试将列转换为数字
+            try:
+                # 先检查是否为字符串类型的列
+                if df_copy[col].dtype == 'object':
+                    # 尝试转换为数字，无法转换的保持原样
+                    converted = pd.to_numeric(df_copy[col], errors='coerce')
+                    # 只有当大部分值都能成功转换时才替换
+                    if converted.notna().sum() > 0:
+                        # 保留原始的非数字值（如 "N/A"）
+                        mask = converted.notna()
+                        df_copy.loc[mask, col] = converted[mask]
+            except Exception:
+                pass
+                
+        return df_copy
 
     def generate_sample_summary(self) -> pd.DataFrame:
         """
@@ -591,7 +834,9 @@ class ModelDeliveryReport:
                                           feature_names: Dict[str, str] = None,
                                           top_n: int = 10,
                                           bins: int = 5,
-                                          bin_method: str = 'quantile') -> pd.DataFrame:
+                                          bin_method: str = 'quantile',
+                                          model: Any = None,
+                                          importance_type: str = 'gain') -> pd.DataFrame:
         """
         生成TOP10变量有效性分析 - 分箱级别统计
 
@@ -601,6 +846,8 @@ class ModelDeliveryReport:
             top_n: 返回前N个特征
             bins: 分箱数量
             bin_method: 分箱方式，'quantile'(等频分箱)或'equal'(等距分箱)
+            model: 可选，用于计算特征重要性的模型（支持LightGBM/XGBoost/sklearn模型）
+            importance_type: 特征重要性类型，'gain'/'split'/'weight'（仅对树模型有效）
 
         Returns:
             变量有效性分析结果 - 每行一个分箱
@@ -611,17 +858,9 @@ class ModelDeliveryReport:
         effectiveness_results = []
 
         # 计算每个特征的总体有效性(gain)
-        feature_gains = {}
-        for feature in features:
-            if feature not in self.data.columns:
-                continue
-
-            # 计算总体IV作为gain指标
-            try:
-                all_iv = self._calculate_iv(self.data[feature], self.data[self.target_col])
-                feature_gains[feature] = all_iv if not pd.isna(all_iv) else 0
-            except:
-                feature_gains[feature] = 0
+        feature_gains = self._calculate_feature_importance(
+            features, model=model, importance_type=importance_type
+        )
 
         # 选择TOP N特征
         top_features = sorted(feature_gains.items(), key=lambda x: x[1], reverse=True)[:top_n]
@@ -649,8 +888,8 @@ class ModelDeliveryReport:
                         'total_gain': f"{total_gain:.4f}"
                     }
 
-                    # 按样本类型统计每个分箱
-                    sample_types = ['train', 'test', 'oot']
+                    # 动态获取样本类型（排除'all'）
+                    sample_types = [t for t in self.data[self.sample_type_col].unique() if t != 'all']
                     for sample_type in sample_types:
                         sample_bin_data = bin_data[bin_data[self.sample_type_col] == sample_type]
 
@@ -687,7 +926,9 @@ class ModelDeliveryReport:
                                                    sample_type: str = 'test',
                                                    top_n: int = 10,
                                                    bins: int = 5,
-                                                   bin_method: str = 'quantile') -> pd.DataFrame:
+                                                   bin_method: str = 'quantile',
+                                                   model: Any = None,
+                                                   importance_type: str = 'gain') -> pd.DataFrame:
         """
         生成按月拆分的变量有效性分析 - 分箱级别按月统计
 
@@ -697,6 +938,9 @@ class ModelDeliveryReport:
             sample_type: 分析的样本类型
             top_n: 返回前N个特征
             bins: 分箱数量
+            bin_method: 分箱方式，'quantile'(等频分箱)或'equal'(等距分箱)
+            model: 可选，用于计算特征重要性的模型
+            importance_type: 特征重要性类型
 
         Returns:
             按月拆分的变量有效性分析结果 - 每行一个分箱
@@ -717,15 +961,9 @@ class ModelDeliveryReport:
         month_strs = [str(m) for m in months]
 
         # 计算特征重要性并选择TOP N
-        feature_gains = {}
-        for feature in features:
-            if feature not in sample_data.columns:
-                continue
-            try:
-                iv = self._calculate_iv(sample_data[feature], sample_data[self.target_col])
-                feature_gains[feature] = iv if not pd.isna(iv) else 0
-            except:
-                feature_gains[feature] = 0
+        feature_gains = self._calculate_feature_importance(
+            features, model=model, importance_type=importance_type
+        )
 
         top_features = sorted(feature_gains.items(), key=lambda x: x[1], reverse=True)[:top_n]
 
@@ -792,7 +1030,9 @@ class ModelDeliveryReport:
                                        feature_names: Dict[str, str] = None,
                                        top_n: int = 10,
                                        bins: int = 5,
-                                       bin_method: str = 'quantile') -> pd.DataFrame:
+                                       bin_method: str = 'quantile',
+                                       model: Any = None,
+                                       importance_type: str = 'gain') -> pd.DataFrame:
         """
         生成TOP10变量稳定性分析 - 分箱级别统计
 
@@ -801,6 +1041,9 @@ class ModelDeliveryReport:
             feature_names: 特征中文名映射
             top_n: 返回前N个特征
             bins: 分箱数量
+            bin_method: 分箱方式，'quantile'(等频分箱)或'equal'(等距分箱)
+            model: 可选，用于计算特征重要性的模型
+            importance_type: 特征重要性类型
 
         Returns:
             变量稳定性分析结果 - 每行一个分箱
@@ -809,31 +1052,27 @@ class ModelDeliveryReport:
             feature_names = {f: f for f in features}
 
         # 计算特征重要性并选择TOP N
-        feature_gains = {}
-        for feature in features:
-            if feature not in self.data.columns:
-                continue
-            try:
-                iv = self._calculate_iv(self.data[feature], self.data[self.target_col])
-                feature_gains[feature] = iv if not pd.isna(iv) else 0
-            except:
-                feature_gains[feature] = 0
+        feature_gains = self._calculate_feature_importance(
+            features, model=model, importance_type=importance_type
+        )
 
         top_features = sorted(feature_gains.items(), key=lambda x: x[1], reverse=True)[:top_n]
 
         stability_results = []
 
-        # 获取train数据作为基准
-        train_data = self.data[self.data[self.sample_type_col] == 'train']
+        # 动态获取样本类型并选择第一个作为基准
+        sample_types_all = [t for t in self.data[self.sample_type_col].unique() if t != 'all']
+        base_sample_type_global = sample_types_all[0] if sample_types_all else 'train'
+        base_data = self.data[self.data[self.sample_type_col] == base_sample_type_global]
 
         for feature, total_gain in top_features:
             if feature not in self.data.columns:
                 continue
 
             try:
-                # 基于train数据确定分箱边界，确保一致性
-                if len(train_data) > 0:
-                    _, bin_edges = pd.cut(train_data[feature], bins=bins, retbins=True, duplicates='drop')
+                # 基于基准数据确定分箱边界，确保一致性
+                if len(base_data) > 0:
+                    _, bin_edges = pd.cut(base_data[feature], bins=bins, retbins=True, duplicates='drop')
                 else:
                     _, bin_edges = pd.cut(self.data[feature], bins=bins, retbins=True, duplicates='drop')
 
@@ -855,13 +1094,16 @@ class ModelDeliveryReport:
                         'total_gain': f"{total_gain:.4f}"
                     }
 
-                    # 分样本类型分析每个分箱
-                    sample_types = ['train', 'test', 'oot']
+                    # 动态获取样本类型（排除'all'）
+                    sample_types = [t for t in self.data[self.sample_type_col].unique() if t != 'all']
+                    
+                    # 获取第一个样本类型作为基准（通常是train）
+                    base_sample_type = sample_types[0] if sample_types else 'train'
 
-                    # 先计算train分箱的分布作为基准
-                    train_bin_data = bin_data[bin_data[self.sample_type_col] == 'train']
-                    train_total = len(self.data[self.data[self.sample_type_col] == 'train'])
-                    train_bin_ratio = len(train_bin_data) / train_total if train_total > 0 else 0
+                    # 先计算基准样本分箱的分布
+                    base_bin_data = bin_data[bin_data[self.sample_type_col] == base_sample_type]
+                    base_total = len(self.data[self.data[self.sample_type_col] == base_sample_type])
+                    base_bin_ratio = len(base_bin_data) / base_total if base_total > 0 else 0
 
                     for sample_type in sample_types:
                         sample_bin_data = bin_data[bin_data[self.sample_type_col] == sample_type]
@@ -897,14 +1139,14 @@ class ModelDeliveryReport:
                         except:
                             bin_result[f'{sample_type}_iv'] = "0.0000"
 
-                        # 计算PSI（以train为基准）
-                        if sample_type == 'train':
+                        # 计算PSI（以第一个样本类型为基准）
+                        if sample_type == base_sample_type:
                             bin_result[f'psi_{sample_type}'] = "0.0000"
                         else:
                             try:
                                 current_bin_ratio = n_sample / sample_total
-                                if train_bin_ratio > 0 and current_bin_ratio > 0:
-                                    psi_contrib = (current_bin_ratio - train_bin_ratio) * np.log(current_bin_ratio / train_bin_ratio)
+                                if base_bin_ratio > 0 and current_bin_ratio > 0:
+                                    psi_contrib = (current_bin_ratio - base_bin_ratio) * np.log(current_bin_ratio / base_bin_ratio)
                                     bin_result[f'psi_{sample_type}'] = f"{psi_contrib:.4f}"
                                 else:
                                     bin_result[f'psi_{sample_type}'] = "0.0000"
@@ -923,7 +1165,9 @@ class ModelDeliveryReport:
                                          feature_names: Dict[str, str] = None,
                                          top_n: int = 10,
                                          bins: int = 5,
-                                         bin_method: str = 'quantile') -> pd.DataFrame:
+                                         bin_method: str = 'quantile',
+                                         model: Any = None,
+                                         importance_type: str = 'gain') -> pd.DataFrame:
         """
         生成单特征时间分布TOP10分析
 
@@ -933,6 +1177,8 @@ class ModelDeliveryReport:
             top_n: 返回前N个特征
             bins: 分箱数量
             bin_method: 分箱方式，'quantile'(等频分箱)或'equal'(等距分箱)
+            model: 可选，用于计算特征重要性的模型
+            importance_type: 特征重要性类型
 
         Returns:
             特征时间分布分析结果
@@ -948,15 +1194,9 @@ class ModelDeliveryReport:
         month_strs = [str(m) for m in months]
 
         # 计算特征重要性并选择TOP N
-        feature_gains = {}
-        for feature in features:
-            if feature not in self.data.columns:
-                continue
-            try:
-                iv = self._calculate_iv(self.data[feature], self.data[self.target_col])
-                feature_gains[feature] = iv if not pd.isna(iv) else 0
-            except:
-                feature_gains[feature] = 0
+        feature_gains = self._calculate_feature_importance(
+            features, model=model, importance_type=importance_type
+        )
 
         top_features = sorted(feature_gains.items(), key=lambda x: x[1], reverse=True)[:top_n]
 
@@ -983,7 +1223,7 @@ class ModelDeliveryReport:
                 result = {}
 
                 # 1. 数据类型(特征)和分箱
-                result['数据类型'] = feature_names.get(feature, feature)
+                result['特征'] = feature_names.get(feature, feature)
                 result['score_bin'] = str(bin_label)
 
                 # 按月统计数据
@@ -1083,7 +1323,7 @@ class ModelDeliveryReport:
             result = {}
 
             # 1. 数据类型和分箱
-            result['数据类型'] = '模型分'
+            result['特征'] = '模型分'
             result['score_bin'] = str(bin_label)
 
             # 按月统计数据
@@ -1149,7 +1389,10 @@ class ModelDeliveryReport:
     def generate_full_report(self, features: List[str] = None,
                            feature_names: Dict[str, str] = None,
                            save_path: str = None,
-                           bin_method: str = 'quantile') -> Dict[str, pd.DataFrame]:
+                           bin_method: str = 'quantile',
+                           model: Any = None,
+                           importance_type: str = 'gain',
+                           experiment_meta: Optional[Dict[str, Any]] = None) -> Dict[str, pd.DataFrame]:
         """
         生成完整的模型交付报告
 
@@ -1158,11 +1401,23 @@ class ModelDeliveryReport:
             feature_names: 特征中文名映射
             save_path: 保存路径（可选）
             bin_method: 分箱方式，'quantile'(等频分箱)或'equal'(等距分箱)
+            model: 可选，用于计算特征重要性的模型（支持LightGBM/XGBoost/sklearn模型）
+            importance_type: 特征重要性类型，'gain'/'split'/'weight'（仅对树模型有效）
+            experiment_meta: 实验元信息（可选），用于记录实验ID、参数、路径等
 
         Returns:
             包含所有报告表格的字典
         """
         report = {}
+
+        # 0. 实验元信息（用于参数-评估追踪）
+        if experiment_meta:
+            meta_rows = []
+            for key, value in experiment_meta.items():
+                if isinstance(value, (dict, list, tuple)):
+                    value = str(value)
+                meta_rows.append({'字段': str(key), '值': value})
+            report['实验信息'] = pd.DataFrame(meta_rows)
 
         try:
             # 1. 样本情况
@@ -1208,7 +1463,10 @@ class ModelDeliveryReport:
         if features:
             try:
                 # 4. TOP10变量有效性
-                report['TOP10变量有效性'] = self.generate_top_features_effectiveness(features, feature_names, bin_method=bin_method)
+                report['TOP10变量有效性'] = self.generate_top_features_effectiveness(
+                    features, feature_names, bin_method=bin_method,
+                    model=model, importance_type=importance_type
+                )
                 print("✓ TOP10变量有效性分析完成")
             except Exception as e:
                 print(f"✗ TOP10变量有效性分析失败: {e}")
@@ -1216,7 +1474,10 @@ class ModelDeliveryReport:
 
             try:
                 # 4-1. 按月拆分的变量有效性（以test为例）
-                report['变量有效性按月拆分'] = self.generate_top_features_effectiveness_monthly(features, feature_names, bin_method=bin_method)
+                report['变量有效性按月拆分'] = self.generate_top_features_effectiveness_monthly(
+                    features, feature_names, bin_method=bin_method,
+                    model=model, importance_type=importance_type
+                )
                 print("✓ 变量有效性按月拆分分析完成")
             except Exception as e:
                 print(f"✗ 变量有效性按月拆分分析失败: {e}")
@@ -1224,7 +1485,10 @@ class ModelDeliveryReport:
 
             try:
                 # 5. TOP10变量稳定性
-                report['TOP10变量稳定性'] = self.generate_top_features_stability(features, feature_names, bin_method=bin_method)
+                report['TOP10变量稳定性'] = self.generate_top_features_stability(
+                    features, feature_names, bin_method=bin_method,
+                    model=model, importance_type=importance_type
+                )
                 print("✓ TOP10变量稳定性分析完成")
             except Exception as e:
                 print(f"✗ TOP10变量稳定性分析失败: {e}")
@@ -1232,7 +1496,10 @@ class ModelDeliveryReport:
 
             try:
                 # 6. 单特征时间分布TOP10
-                report['单特征时间分布TOP10'] = self.generate_feature_time_distribution(features, feature_names, bin_method=bin_method)
+                report['单特征时间分布TOP10'] = self.generate_feature_time_distribution(
+                    features, feature_names, bin_method=bin_method,
+                    model=model, importance_type=importance_type
+                )
                 print("✓ 单特征时间分布分析完成")
             except Exception as e:
                 print(f"✗ 单特征时间分布分析失败: {e}")
@@ -1251,7 +1518,12 @@ class ModelDeliveryReport:
             try:
                 from openpyxl import Workbook
                 from openpyxl.drawing.image import Image as OpenpyxlImage
+                from openpyxl.styles import PatternFill
                 import os
+
+                # 定义蓝白交替填充颜色
+                blue_fill = PatternFill(start_color="CCE5FF", end_color="CCE5FF", fill_type="solid")
+                white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
 
                 # 获取图片信息
                 metric_images = report.pop('_metric_images', {})
@@ -1260,7 +1532,17 @@ class ModelDeliveryReport:
                     # 先写入所有数据表格
                     for sheet_name, df in report.items():
                         if not df.empty and not sheet_name.startswith('_'):
-                            df.to_excel(writer, sheet_name=sheet_name, index=False)
+                            # 转换数字字符串为真正的数字
+                            df_converted = self._convert_numeric_strings(df)
+                            df_converted.to_excel(writer, sheet_name=sheet_name, index=False)
+                            
+                            # 对涉及分箱的表格应用蓝白交替填充
+                            self._apply_alternating_fill(
+                                writer.sheets[sheet_name], 
+                                df, 
+                                blue_fill, 
+                                white_fill
+                            )
 
                     # 为每个样本类型的图片创建单独的sheet
                     for sample_type, img_path in metric_images.items():

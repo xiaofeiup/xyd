@@ -46,6 +46,10 @@ from .objectives import (
     OBJECTIVE_FUNCTIONS
 )
 
+from .experiment_pipeline import (
+    run_experiment_batch
+)
+
 __all__ = [
     # 主要优化器
     'HyperparameterTuner',
@@ -80,5 +84,8 @@ __all__ = [
     'R2Objective',
     'get_objective_function',
     'create_credit_scoring_objective',
-    'OBJECTIVE_FUNCTIONS'
+    'OBJECTIVE_FUNCTIONS',
+
+    # 参数-评估一体化流水线
+    'run_experiment_batch'
 ]

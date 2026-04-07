@@ -19,6 +19,7 @@ import joblib
 import logging
 from datetime import datetime
 import os
+from .parameter_spaces import get_parameter_space
 
 # 设置optuna日志级别
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -78,6 +79,8 @@ class HyperparameterTuner:
         self.best_params_ = None
         self.best_score_ = None
         self.optimization_history_ = []
+        self.parameter_mode = 'default'
+        self.task_type = 'classification'
 
     def _detect_model_type(self, model_class: Any) -> str:
         """自动检测模型类型"""
@@ -127,19 +130,12 @@ class HyperparameterTuner:
         """
         if self.custom_param_space:
             return self._suggest_custom_parameters(trial)
-
-        if self.model_type == 'lgb':
-            return self._suggest_lgb_parameters(trial)
-        elif self.model_type == 'xgb':
-            return self._suggest_xgb_parameters(trial)
-        elif self.model_type == 'rf':
-            return self._suggest_rf_parameters(trial)
-        elif self.model_type == 'lr':
-            return self._suggest_lr_parameters(trial)
-        elif self.model_type == 'svm':
-            return self._suggest_svm_parameters(trial)
-        else:
-            raise ValueError(f"不支持的模型类型: {self.model_type}")
+        space_cls = get_parameter_space(self.model_type)
+        return space_cls.suggest_parameters(
+            trial=trial,
+            task_type=self.task_type,
+            mode=self.parameter_mode
+        )
 
     def _suggest_custom_parameters(self, trial: optuna.Trial) -> Dict[str, Any]:
         """建议自定义参数"""
@@ -168,117 +164,6 @@ class HyperparameterTuner:
                     param_name,
                     param_config['choices']
                 )
-
-        return params
-
-    def _suggest_lgb_parameters(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """
-        LightGBM参数建议（考虑参数间约束）
-        """
-        # 基础参数
-        params = {
-            'objective': trial.suggest_categorical('objective', ['binary', 'regression']),
-            'metric': trial.suggest_categorical('metric', ['binary_logloss', 'auc', 'rmse', 'mae']),
-            'boosting_type': trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss']),
-            'num_leaves': trial.suggest_int('num_leaves', 10, 300),
-            'max_depth': trial.suggest_int('max_depth', 3, 15),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-            'n_estimators': trial.suggest_int('n_estimators', 50, 1000),
-            'subsample_for_bin': trial.suggest_int('subsample_for_bin', 50000, 200000),
-            'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
-            'min_child_weight': trial.suggest_float('min_child_weight', 0.001, 10.0, log=True),
-            'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
-            'subsample': trial.suggest_float('subsample', 0.4, 1.0),
-            'subsample_freq': trial.suggest_int('subsample_freq', 0, 7),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.4, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
-            'random_state': 42,
-            'n_jobs': -1
-        }
-
-        # 处理num_leaves和max_depth的约束关系
-        # num_leaves应该 < 2^max_depth
-        max_leaves_for_depth = 2 ** params['max_depth']
-        if params['num_leaves'] >= max_leaves_for_depth:
-            params['num_leaves'] = max_leaves_for_depth - 1
-
-        # 如果选择了DART，添加特定参数
-        if params['boosting_type'] == 'dart':
-            params['drop_rate'] = trial.suggest_float('drop_rate', 0.01, 0.5)
-            params['max_drop'] = trial.suggest_int('max_drop', 1, 50)
-            params['skip_drop'] = trial.suggest_float('skip_drop', 0.0, 1.0)
-
-        return params
-
-    def _suggest_xgb_parameters(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """XGBoost参数建议"""
-        params = {
-            'objective': trial.suggest_categorical('objective', ['binary:logistic', 'reg:squarederror']),
-            'eval_metric': trial.suggest_categorical('eval_metric', ['logloss', 'auc', 'rmse', 'mae']),
-            'booster': trial.suggest_categorical('booster', ['gbtree', 'dart']),
-            'max_depth': trial.suggest_int('max_depth', 3, 15),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-            'n_estimators': trial.suggest_int('n_estimators', 50, 1000),
-            'min_child_weight': trial.suggest_float('min_child_weight', 0.1, 10.0, log=True),
-            'gamma': trial.suggest_float('gamma', 0.0, 1.0),
-            'subsample': trial.suggest_float('subsample', 0.4, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.4, 1.0),
-            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.4, 1.0),
-            'colsample_bynode': trial.suggest_float('colsample_bynode', 0.4, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
-            'random_state': 42,
-            'n_jobs': -1
-        }
-
-        # DART特定参数
-        if params['booster'] == 'dart':
-            params['sample_type'] = trial.suggest_categorical('sample_type', ['uniform', 'weighted'])
-            params['normalize_type'] = trial.suggest_categorical('normalize_type', ['tree', 'forest'])
-            params['rate_drop'] = trial.suggest_float('rate_drop', 0.01, 0.5)
-            params['skip_drop'] = trial.suggest_float('skip_drop', 0.0, 1.0)
-
-        return params
-
-    def _suggest_rf_parameters(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """RandomForest参数建议"""
-        return {
-            'n_estimators': trial.suggest_int('n_estimators', 50, 500),
-            'max_depth': trial.suggest_int('max_depth', 3, 20),
-            'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-            'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 20),
-            'max_features': trial.suggest_categorical('max_features', ['auto', 'sqrt', 'log2', None]),
-            'bootstrap': trial.suggest_categorical('bootstrap', [True, False]),
-            'random_state': 42,
-            'n_jobs': -1
-        }
-
-    def _suggest_lr_parameters(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """LogisticRegression参数建议"""
-        return {
-            'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
-            'penalty': trial.suggest_categorical('penalty', ['l1', 'l2', 'elasticnet', 'none']),
-            'solver': trial.suggest_categorical('solver', ['liblinear', 'saga', 'lbfgs']),
-            'max_iter': trial.suggest_int('max_iter', 100, 1000),
-            'random_state': 42,
-            'n_jobs': -1
-        }
-
-    def _suggest_svm_parameters(self, trial: optuna.Trial) -> Dict[str, Any]:
-        """SVM参数建议"""
-        kernel = trial.suggest_categorical('kernel', ['linear', 'poly', 'rbf', 'sigmoid'])
-        params = {
-            'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
-            'kernel': kernel,
-            'random_state': 42
-        }
-
-        if kernel == 'poly':
-            params['degree'] = trial.suggest_int('degree', 2, 5)
-
-        if kernel in ['poly', 'rbf', 'sigmoid']:
-            params['gamma'] = trial.suggest_categorical('gamma', ['scale', 'auto'])
 
         return params
 
@@ -311,6 +196,8 @@ class HyperparameterTuner:
         Returns:
             优化结果字典
         """
+        self.task_type = 'classification' if self._is_classification_task(y) else 'regression'
+
         # 设置默认评分函数
         if scoring == 'auto':
             scoring = self._get_default_scoring()

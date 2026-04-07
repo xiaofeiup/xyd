@@ -14,7 +14,11 @@ class ParameterSpace:
     """参数空间定义基类"""
 
     @staticmethod
-    def suggest_parameters(trial: optuna.Trial, task_type: str = 'classification') -> Dict[str, Any]:
+    def suggest_parameters(
+        trial: optuna.Trial,
+        task_type: str = 'classification',
+        mode: str = 'default'
+    ) -> Dict[str, Any]:
         """建议参数方法，子类需要实现"""
         raise NotImplementedError
 
@@ -23,7 +27,11 @@ class LightGBMSpace(ParameterSpace):
     """LightGBM参数空间定义"""
 
     @staticmethod
-    def suggest_parameters(trial: optuna.Trial, task_type: str = 'classification') -> Dict[str, Any]:
+    def suggest_parameters(
+        trial: optuna.Trial,
+        task_type: str = 'classification',
+        mode: str = 'default'
+    ) -> Dict[str, Any]:
         """
         LightGBM参数建议，考虑参数间约束关系
 
@@ -38,15 +46,13 @@ class LightGBMSpace(ParameterSpace):
         boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
 
         # 树结构参数（关键约束：num_leaves < 2^max_depth）
-        max_depth = trial.suggest_int('max_depth', 3, 15)
-        # 计算该深度下的理论最大叶子数，但实际设置要更保守
+        max_depth = trial.suggest_int('max_depth', 3, 8)
         theoretical_max_leaves = 2 ** max_depth
-        # 实际最大叶子数设为理论值的50%-90%，避免过拟合
-        max_leaves_upper = max(10, int(theoretical_max_leaves * 0.8))
-        num_leaves = trial.suggest_int('num_leaves', 10, min(300, max_leaves_upper))
+        max_leaves_upper = int(theoretical_max_leaves * 0.8)
+        num_leaves = trial.suggest_int('num_leaves', 4, max_leaves_upper)
 
         # 学习率和迭代次数（负相关关系）
-        learning_rate = trial.suggest_float('learning_rate', 0.01, 0.3, log=True)
+        learning_rate = trial.suggest_float('learning_rate', 0.001, 0.3, log=True)
         # 学习率越小，需要更多迭代次数
         if learning_rate < 0.05:
             n_estimators_upper = 1500
@@ -66,11 +72,11 @@ class LightGBMSpace(ParameterSpace):
             'subsample_for_bin': trial.suggest_int('subsample_for_bin', 50000, 200000),
             'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
             'min_child_weight': trial.suggest_float('min_child_weight', 0.001, 10.0, log=True),
-            'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
-            'subsample': trial.suggest_float('subsample', 0.4, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.4, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
+            'min_child_samples': trial.suggest_int('min_child_samples', 20, 120) if mode == 'anti_overfitting' else trial.suggest_int('min_child_samples', 5, 100),
+            'subsample': trial.suggest_float('subsample', 0.6, 0.95) if mode == 'anti_overfitting' else trial.suggest_float('subsample', 0.4, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.95) if mode == 'anti_overfitting' else trial.suggest_float('colsample_bytree', 0.4, 1.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 1e-4, 20.0, log=True),  # L1正则
+            'reg_lambda': trial.suggest_float('reg_lambda', 1e-4, 20.0, log=True),  # L2正则
             'random_state': 42,
             'n_jobs': -1,
             'verbosity': -1
@@ -139,13 +145,17 @@ class XGBoostSpace(ParameterSpace):
     """XGBoost参数空间定义"""
 
     @staticmethod
-    def suggest_parameters(trial: optuna.Trial, task_type: str = 'classification') -> Dict[str, Any]:
+    def suggest_parameters(
+        trial: optuna.Trial,
+        task_type: str = 'classification',
+        mode: str = 'default'
+    ) -> Dict[str, Any]:
         """XGBoost参数建议"""
         booster = trial.suggest_categorical('booster', ['gbtree', 'dart'])
 
         # 树深度和学习率关系
         max_depth = trial.suggest_int('max_depth', 3, 12)
-        learning_rate = trial.suggest_float('learning_rate', 0.01, 0.3, log=True)
+        learning_rate = trial.suggest_float('learning_rate', 0.001, 0.3, log=True)
 
         # 根据学习率调整迭代次数
         if learning_rate < 0.05:
@@ -159,15 +169,15 @@ class XGBoostSpace(ParameterSpace):
             'booster': booster,
             'max_depth': max_depth,
             'learning_rate': learning_rate,
-            'n_estimators': trial.suggest_int('n_estimators', 50, n_estimators_upper),
-            'min_child_weight': trial.suggest_float('min_child_weight', 0.1, 10.0, log=True),
-            'gamma': trial.suggest_float('gamma', 0.0, 1.0),
-            'subsample': trial.suggest_float('subsample', 0.4, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.4, 1.0),
+            'n_estimators': trial.suggest_int('n_estimators', 50, min(600, n_estimators_upper)) if mode == 'anti_overfitting' else trial.suggest_int('n_estimators', 50, n_estimators_upper),
+            'min_child_weight': trial.suggest_float('min_child_weight', 1.0, 12.0, log=True) if mode == 'anti_overfitting' else trial.suggest_float('min_child_weight', 0.1, 10.0, log=True),
+            'gamma': trial.suggest_float('gamma', 0.1, 5.0) if mode == 'anti_overfitting' else trial.suggest_float('gamma', 0.0, 1.0),
+            'subsample': trial.suggest_float('subsample', 0.6, 0.95) if mode == 'anti_overfitting' else trial.suggest_float('subsample', 0.4, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.95) if mode == 'anti_overfitting' else trial.suggest_float('colsample_bytree', 0.4, 1.0),
             'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.4, 1.0),
             'colsample_bynode': trial.suggest_float('colsample_bynode', 0.4, 1.0),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 1e-4, 10.0, log=True),
+            'reg_lambda': trial.suggest_float('reg_lambda', 1e-4, 10.0, log=True),
             'random_state': 42,
             'n_jobs': -1
         }
@@ -196,15 +206,23 @@ class RandomForestSpace(ParameterSpace):
     """RandomForest参数空间定义"""
 
     @staticmethod
-    def suggest_parameters(trial: optuna.Trial, task_type: str = 'classification') -> Dict[str, Any]:
+    def suggest_parameters(
+        trial: optuna.Trial,
+        task_type: str = 'classification',
+        mode: str = 'default'
+    ) -> Dict[str, Any]:
         """RandomForest参数建议"""
         n_estimators = trial.suggest_int('n_estimators', 50, 500)
         max_depth = trial.suggest_int('max_depth', 3, 20)
 
         # min_samples_split和min_samples_leaf的约束关系
-        min_samples_split = trial.suggest_int('min_samples_split', 2, 20)
+        min_samples_split = trial.suggest_int('min_samples_split', 10, 60) if mode == 'anti_overfitting' else trial.suggest_int('min_samples_split', 2, 20)
         # min_samples_leaf应该小于min_samples_split
-        min_samples_leaf = trial.suggest_int('min_samples_leaf', 1, min(10, min_samples_split - 1))
+        min_samples_leaf = (
+            trial.suggest_int('min_samples_leaf', 5, min(20, min_samples_split - 1))
+            if mode == 'anti_overfitting'
+            else trial.suggest_int('min_samples_leaf', 1, min(10, min_samples_split - 1))
+        )
 
         params = {
             'n_estimators': n_estimators,
@@ -230,12 +248,20 @@ class SVMSpace(ParameterSpace):
     """SVM参数空间定义"""
 
     @staticmethod
-    def suggest_parameters(trial: optuna.Trial, task_type: str = 'classification') -> Dict[str, Any]:
+    def suggest_parameters(
+        trial: optuna.Trial,
+        task_type: str = 'classification',
+        mode: str = 'default'
+    ) -> Dict[str, Any]:
         """SVM参数建议"""
-        kernel = trial.suggest_categorical('kernel', ['linear', 'poly', 'rbf', 'sigmoid'])
+        kernel = (
+            trial.suggest_categorical('kernel', ['linear', 'rbf'])
+            if mode == 'anti_overfitting'
+            else trial.suggest_categorical('kernel', ['linear', 'poly', 'rbf', 'sigmoid'])
+        )
 
         params = {
-            'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
+            'C': trial.suggest_float('C', 1e-4, 10.0, log=True) if mode == 'anti_overfitting' else trial.suggest_float('C', 1e-4, 1e2, log=True),
             'kernel': kernel,
             'random_state': 42
         }
@@ -259,28 +285,35 @@ class LogisticRegressionSpace(ParameterSpace):
     """LogisticRegression参数空间定义"""
 
     @staticmethod
-    def suggest_parameters(trial: optuna.Trial, task_type: str = 'classification') -> Dict[str, Any]:
+    def suggest_parameters(
+        trial: optuna.Trial,
+        task_type: str = 'classification',
+        mode: str = 'default'
+    ) -> Dict[str, Any]:
         """LogisticRegression参数建议"""
-        penalty = trial.suggest_categorical('penalty', ['l1', 'l2', 'elasticnet', 'none'])
+        solver = trial.suggest_categorical('solver', ['liblinear', 'saga', 'lbfgs'])
+        if solver == 'lbfgs':
+            penalty = trial.suggest_categorical('penalty', ['l2', 'none'])
+        elif solver == 'liblinear':
+            penalty = trial.suggest_categorical('penalty', ['l1', 'l2'])
+        else:
+            penalty = trial.suggest_categorical('penalty', ['l1', 'l2', 'elasticnet', 'none'])
 
         params = {
             'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
             'penalty': penalty,
+            'solver': solver,
             'max_iter': trial.suggest_int('max_iter', 100, 1000),
             'random_state': 42,
-            'n_jobs': -1
         }
 
-        # 求解器和惩罚项的兼容性约束
-        if penalty == 'l1':
-            params['solver'] = trial.suggest_categorical('solver', ['liblinear', 'saga'])
-        elif penalty == 'l2':
-            params['solver'] = trial.suggest_categorical('solver', ['liblinear', 'saga', 'lbfgs'])
-        elif penalty == 'elasticnet':
-            params['solver'] = 'saga'  # 只有saga支持elasticnet
+        # elasticnet约束
+        if penalty == 'elasticnet':
             params['l1_ratio'] = trial.suggest_float('l1_ratio', 0.0, 1.0)
-        else:  # none
-            params['solver'] = trial.suggest_categorical('solver', ['saga', 'lbfgs'])
+
+        # liblinear不支持n_jobs
+        if solver != 'liblinear':
+            params['n_jobs'] = -1
 
         return params
 
@@ -336,7 +369,11 @@ def create_custom_space(param_definitions: Dict[str, Dict[str, Any]]) -> Callabl
     Returns:
         参数建议函数
     """
-    def suggest_parameters(trial: optuna.Trial, task_type: str = 'classification') -> Dict[str, Any]:
+    def suggest_parameters(
+        trial: optuna.Trial,
+        task_type: str = 'classification',
+        mode: str = 'default'
+    ) -> Dict[str, Any]:
         params = {}
 
         for param_name, config in param_definitions.items():
@@ -373,7 +410,7 @@ class CreditScoringSpace:
     """信贷评分模型专用参数空间"""
 
     @staticmethod
-    def suggest_lgb_credit_params(trial: optuna.Trial) -> Dict[str, Any]:
+    def suggest_lgb_credit_params(trial: optuna.Trial, mode: str = 'default') -> Dict[str, Any]:
         """
         信贷评分LightGBM专用参数
         更保守的参数设置，注重模型稳定性和可解释性
