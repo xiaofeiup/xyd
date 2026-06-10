@@ -7,18 +7,21 @@
 import pandas as pd
 import numpy as np
 import warnings
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple, Union
 from sklearn.feature_selection import SelectKBest, f_classif, chi2, mutual_info_classif
-from sklearn.feature_selection import RFE, SelectFromModel
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import RFE
 from sklearn.linear_model import LogisticRegression
 
 
-def filter_features_by_single_value_ratio(data: pd.DataFrame,
-                                         threshold: float = 0.95,
-                                         exclude_cols: Optional[List[str]] = None) -> Tuple[List[str], pd.DataFrame]:
+def filter_features_by_single_value_ratio(
+    data: pd.DataFrame,
+    threshold: float = 0.95,
+    exclude_cols: Optional[List[str]] = None
+) -> Tuple[List[str], pd.DataFrame]:
     """
-    基于单一值占比筛选特征
+    基于单一值占比筛选特征（优化版本：使用向量化操作）
 
     如果某个特征的最频繁值（包含空值）占总数据量的比例超过阈值，则去掉该特征
 
@@ -40,15 +43,16 @@ def filter_features_by_single_value_ratio(data: pd.DataFrame,
     """
     exclude_cols = exclude_cols or []
     check_cols = [col for col in data.columns if col not in exclude_cols]
-
+    
+    total_count = len(data)
+    
+    # 向量化计算：一次性计算所有特征的统计
     filter_results = []
-    selected_features = []
-
+    
     for col in check_cols:
         # 计算每个值的频次（包括NaN）
         value_counts = data[col].value_counts(dropna=False)
-        total_count = len(data)
-
+        
         if len(value_counts) == 0:
             # 空列
             max_ratio = 1.0
@@ -60,15 +64,14 @@ def filter_features_by_single_value_ratio(data: pd.DataFrame,
             most_frequent_value = value_counts.index[0]
             max_count = value_counts.iloc[0]
             max_ratio = max_count / total_count
-
+            
             if max_ratio >= threshold:
                 reason = f"最频繁值占比{max_ratio:.2%}超过阈值{threshold:.2%}"
                 keep_feature = False
             else:
                 reason = f"最频繁值占比{max_ratio:.2%}，通过筛选"
                 keep_feature = True
-                selected_features.append(col)
-
+        
         filter_results.append({
             'feature': col,
             'keep_feature': keep_feature,
@@ -78,9 +81,10 @@ def filter_features_by_single_value_ratio(data: pd.DataFrame,
             'missing_ratio': data[col].isna().sum() / total_count,
             'filter_reason': reason
         })
-
+    
+    selected_features = [item['feature'] for item in filter_results if item['keep_feature']]
     filter_log = pd.DataFrame(filter_results)
-
+    
     return selected_features, filter_log
 
 
@@ -184,18 +188,13 @@ class FeatureSelector:
 
     def _fit_iv_selection(self, X: pd.DataFrame, y: pd.Series):
         """
-        基于IV的特征选择
+        基于IV的特征选择（优化版本：移除不必要的并行逻辑）
 
         添加IV阈值筛选：小于阈值的特征会被去掉
         """
-        data = X.copy()
-        data['target'] = y
-
-        # 计算所有特征的IV值
-        iv_results = []
-        for feature in X.columns:
+        def _calculate_feature_iv(feature: str) -> Dict[str, Union[str, float, bool]]:
             try:
-                iv_value = calculate_iv(data[feature], data['target'])
+                iv_value = calculate_iv(X[feature], y)
 
                 # 判断是否通过IV阈值
                 if iv_value < self.iv_threshold:
@@ -217,23 +216,27 @@ class FeatureSelector:
                 else:
                     interpretation = "过强预测能力(可能过拟合)"
 
-                iv_results.append({
+                return {
                     'feature': feature,
                     'iv_value': iv_value,
                     'interpretation': interpretation,
                     'keep_feature': keep_feature,
                     'filter_reason': reason
-                })
+                }
 
             except Exception as e:
                 warnings.warn(f"特征 {feature} IV计算失败: {str(e)}")
-                iv_results.append({
+                return {
                     'feature': feature,
                     'iv_value': 0.0,
                     'interpretation': "计算失败",
                     'keep_feature': False,
                     'filter_reason': f"IV计算失败: {str(e)}"
-                })
+                }
+
+        # 计算所有特征的IV值（单线程，避免GIL瓶颈）
+        features = list(X.columns)
+        iv_results = [_calculate_feature_iv(feature) for feature in features]
 
         # 保存IV筛选日志
         self.iv_log_ = pd.DataFrame(iv_results).sort_values('iv_value', ascending=False)
@@ -283,7 +286,9 @@ class FeatureSelector:
         # 第一步：基于单一值占比预筛选
         exclude_cols = [target_col] if target_col else []
         self.pre_filtered_features_, self.filter_log_ = filter_features_by_single_value_ratio(
-            X, threshold=self.single_value_threshold, exclude_cols=exclude_cols
+            X,
+            threshold=self.single_value_threshold,
+            exclude_cols=exclude_cols
         )
 
         print(f"预筛选完成：{len(X.columns)} -> {len(self.pre_filtered_features_)} 个特征")
@@ -367,7 +372,20 @@ class FeatureSelector:
             'iv_filter_remaining': len(self.iv_log_[self.iv_log_['keep_feature']]),
             'final_selected': final_selected,
             'single_value_threshold': self.single_value_threshold,
-            'iv_threshold': self.iv_threshold
+            'iv_threshold': self.iv_threshold,
+            'selected_features': self.selected_features_ or [],
+            'filter_steps': [
+                {
+                    'step': 'single_value_filter',
+                    'removed': pre_filter_removed,
+                    'remaining': len(self.pre_filtered_features_)
+                },
+                {
+                    'step': 'iv_filter',
+                    'removed': iv_filter_removed,
+                    'remaining': len(self.iv_log_[self.iv_log_['keep_feature']])
+                }
+            ]
         }
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -421,10 +439,10 @@ class FeatureSelector:
         self.feature_scores_ = dict(zip(X.columns, rfe.ranking_))
 
     def _fit_lasso_selection(self, X: pd.DataFrame, y: pd.Series):
-        """基于Lasso的特征选择"""
+        """基于Lasso的特征选择（优化版本：移除 n_jobs 参数）"""
         from sklearn.linear_model import LassoCV
 
-        # 使用交叉验证选择最优alpha
+        # 使用交叉验证选择最优alpha（单线程，避免GIL瓶颈）
         lasso = LassoCV(cv=5, random_state=42, max_iter=2000)
         lasso.fit(X, y)
 

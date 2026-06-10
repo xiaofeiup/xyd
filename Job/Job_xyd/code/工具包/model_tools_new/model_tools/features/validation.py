@@ -645,12 +645,12 @@ class FeatureValidator:
 
         return predictive_power
 
-    def _calculate_information_value(self, feature: pd.Series, target: pd.Series) -> float:
+    def _calculate_information_value(self, feature: pd.Series, target: pd.Series, bins=10, lamb=0.001) -> float:
         """计算信息价值(IV)"""
         try:
             # 对连续变量进行分箱
             if pd.api.types.is_numeric_dtype(feature):
-                feature_binned = pd.qcut(feature, q=10, duplicates='drop')
+                feature_binned = pd.qcut(feature, q=bins, duplicates='drop')
             else:
                 feature_binned = feature
 
@@ -659,18 +659,14 @@ class FeatureValidator:
 
             if cross_tab.shape[1] != 2:
                 return 0
-
+        
             cross_tab.columns = ['good', 'bad']
-
-            # 避免除零错误
-            cross_tab['good'] = cross_tab['good'] + 0.5
-            cross_tab['bad'] = cross_tab['bad'] + 0.5
 
             total_good = cross_tab['good'].sum()
             total_bad = cross_tab['bad'].sum()
 
-            cross_tab['good_rate'] = cross_tab['good'] / total_good
-            cross_tab['bad_rate'] = cross_tab['bad'] / total_bad
+            cross_tab['good_rate'] = cross_tab['good'] / total_good + lamb
+            cross_tab['bad_rate'] = cross_tab['bad'] / total_bad  + lamb
             cross_tab['woe'] = np.log(cross_tab['good_rate'] / cross_tab['bad_rate'])
             cross_tab['iv'] = (cross_tab['good_rate'] - cross_tab['bad_rate']) * cross_tab['woe']
 

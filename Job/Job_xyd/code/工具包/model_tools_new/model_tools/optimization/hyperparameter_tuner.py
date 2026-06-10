@@ -11,14 +11,13 @@
 import optuna
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Callable, Union, Any, Tuple
+from typing import Dict, List, Optional, Callable, Union, Any
 import warnings
-from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
-from sklearn.metrics import make_scorer
+import threading
+from sklearn.model_selection import StratifiedKFold, KFold
+from sklearn.metrics import get_scorer
+from sklearn.utils.multiclass import type_of_target
 import joblib
-import logging
-from datetime import datetime
-import os
 from .parameter_spaces import get_parameter_space
 
 # 设置optuna日志级别
@@ -75,12 +74,13 @@ class HyperparameterTuner:
 
         # 存储配置
         self.custom_param_space = None
-        self.custom_objective = None
         self.best_params_ = None
         self.best_score_ = None
         self.optimization_history_ = []
+        self._history_lock = threading.Lock()
         self.parameter_mode = 'default'
         self.task_type = 'classification'
+        self.n_classes_ = None
 
     def _detect_model_type(self, model_class: Any) -> str:
         """自动检测模型类型"""
@@ -128,7 +128,7 @@ class HyperparameterTuner:
         Returns:
             参数字典
         """
-        if self.custom_param_space:
+        if self.custom_param_space is not None:
             return self._suggest_custom_parameters(trial)
         space_cls = get_parameter_space(self.model_type)
         return space_cls.suggest_parameters(
@@ -196,40 +196,70 @@ class HyperparameterTuner:
         Returns:
             优化结果字典
         """
-        self.task_type = 'classification' if self._is_classification_task(y) else 'regression'
+        # 统一判定任务类型（分类/回归）以及类别数，供 splitter 与 scoring 共用
+        is_classification = self._is_classification_task(y)
+        self.task_type = 'classification' if is_classification else 'regression'
+        self.n_classes_ = int(len(np.unique(y))) if is_classification else None
 
-        # 设置默认评分函数
+        # 设置默认评分函数（与上面的任务判定保持一致来源）
         if scoring == 'auto':
             scoring = self._get_default_scoring()
 
         # 设置交叉验证
-        if self._is_classification_task(y):
+        if is_classification:
             cv_splitter = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
         else:
             cv_splitter = KFold(n_splits=cv, shuffle=True, random_state=42)
+
+        # 每次调用都重置历史，避免多次 optimize 的记录互相污染
+        with self._history_lock:
+            self.optimization_history_ = []
+
+        if n_jobs != 1:
+            warnings.warn(
+                "n_jobs != 1 时，TPESampler 的采样顺序不确定，固定的 seed 无法保证结果可复现。"
+                "如需严格复现，请使用 n_jobs=1。"
+            )
 
         def objective(trial):
             try:
                 # 获取参数
                 params = self._suggest_parameters(trial)
 
-                # 创建模型
-                model = self.model_class(**params)
+                # 逐折交叉验证，并向 Optuna 上报中间结果以启用剪枝器
+                fold_scores = []
+                scorer = get_scorer(scoring) if isinstance(scoring, str) else scoring
+                X_arr = X.values if isinstance(X, (pd.DataFrame, pd.Series)) else np.asarray(X)
+                y_arr = y.values if isinstance(y, (pd.Series, pd.DataFrame)) else np.asarray(y)
 
-                # 交叉验证评估
-                scores = cross_val_score(model, X, y, cv=cv_splitter, scoring=scoring, n_jobs=1)
+                for step, (train_idx, valid_idx) in enumerate(cv_splitter.split(X_arr, y_arr)):
+                    model = self.model_class(**params)
+                    model.fit(X_arr[train_idx], y_arr[train_idx])
+                    fold_score = scorer(model, X_arr[valid_idx], y_arr[valid_idx])
+                    fold_scores.append(fold_score)
+
+                    # 上报当前累计均值，并询问是否应当剪枝
+                    trial.report(float(np.mean(fold_scores)), step)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned()
+
+                scores = np.array(fold_scores)
                 score = scores.mean()
 
-                # 记录历史
-                self.optimization_history_.append({
-                    'trial': trial.number,
-                    'score': score,
-                    'params': params.copy(),
-                    'std': scores.std()
-                })
+                # 记录历史（加锁以支持 n_jobs > 1 的并行场景）
+                with self._history_lock:
+                    self.optimization_history_.append({
+                        'trial': trial.number,
+                        'score': score,
+                        'params': params.copy(),
+                        'std': scores.std()
+                    })
 
                 return score
 
+            except optuna.TrialPruned:
+                # 剪枝异常必须向上抛出，交由 Optuna 处理
+                raise
             except Exception as e:
                 warnings.warn(f"Trial {trial.number} failed: {str(e)}")
                 return float('-inf') if self.direction == 'maximize' else float('inf')
@@ -244,6 +274,19 @@ class HyperparameterTuner:
             callbacks=callbacks
         )
 
+        # 校验是否存在有效（已完成且分数有限）的 trial，避免“全部失败却静默成功”
+        completed = [
+            t for t in self.study.trials
+            if t.state == optuna.trial.TrialState.COMPLETE
+            and t.value is not None
+            and np.isfinite(t.value)
+        ]
+        if not completed:
+            raise RuntimeError(
+                "所有 trial 均失败或未产生有效分数，无法得到最佳参数。"
+                "请检查模型参数空间、评分函数与数据是否匹配（可查看 warnings 输出）。"
+            )
+
         # 保存最佳结果
         self.best_params_ = self.study.best_params
         self.best_score_ = self.study.best_value
@@ -256,20 +299,28 @@ class HyperparameterTuner:
         }
 
     def _get_default_scoring(self) -> str:
-        """获取默认评分函数"""
-        model_name = self.model_class.__name__.lower()
+        """
+        获取默认评分函数
 
-        if 'classifier' in model_name:
+        基于已判定的任务类型与类别数选择，确保与交叉验证 splitter 来源一致。
+        """
+        if self.task_type == 'classification':
+            # 二分类用 roc_auc，多分类用支持多类的 roc_auc_ovr
+            if self.n_classes_ is not None and self.n_classes_ > 2:
+                return 'roc_auc_ovr'
             return 'roc_auc'
-        elif 'regressor' in model_name:
-            return 'neg_mean_squared_error'
         else:
-            return 'accuracy'  # 默认
+            return 'neg_mean_squared_error'
 
     def _is_classification_task(self, y: Union[np.ndarray, pd.Series]) -> bool:
-        """判断是否为分类任务"""
-        unique_values = np.unique(y)
-        return len(unique_values) <= 10 and all(isinstance(val, (int, np.integer)) for val in unique_values)
+        """
+        判断是否为分类任务
+
+        使用 sklearn 的 type_of_target，能正确处理浮点编码标签（如 0.0/1.0）、
+        布尔标签、字符串标签等，避免基于 dtype 的误判。
+        """
+        target_type = type_of_target(y)
+        return target_type in ('binary', 'multiclass')
 
     def get_best_model(self, X: np.ndarray, y: np.ndarray) -> Any:
         """使用最佳参数训练模型"""
@@ -311,7 +362,14 @@ class HyperparameterTuner:
         with open(filepath, 'rb') as f:
             self.study = joblib.load(f)
 
-        if self.study.best_trial:
+        # study.best_trial 在没有已完成 trial 时会抛 ValueError，需用已完成 trial 判断
+        completed = [
+            t for t in self.study.trials
+            if t.state == optuna.trial.TrialState.COMPLETE
+            and t.value is not None
+            and np.isfinite(t.value)
+        ]
+        if completed:
             self.best_params_ = self.study.best_params
             self.best_score_ = self.study.best_value
 

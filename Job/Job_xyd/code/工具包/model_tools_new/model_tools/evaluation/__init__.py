@@ -34,6 +34,9 @@ from .metrics import (
 from .roi_evaluation import (
     ModelROIEvaluator
 )
+from .delivery_report import (
+    ModelDeliveryReport
+)
 
 __all__ = [
     # 分类模型指标
@@ -62,5 +65,6 @@ __all__ = [
 
     # 模型评估器
     'ModelEvaluator',
-    'ModelROIEvaluator'
+    'ModelROIEvaluator',
+    'ModelDeliveryReport'
 ]

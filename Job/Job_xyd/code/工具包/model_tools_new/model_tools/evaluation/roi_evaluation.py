@@ -55,14 +55,11 @@ class ModelROIEvaluator:
         """
         params = {**self.default_params, **business_params}
 
-        # 基于阈值的决策
-        y_pred = (y_prob >= threshold).astype(int)
-
-        # 计算混淆矩阵
-        tp = np.sum((y_pred == 1) & (y_true == 1))  # 正确拒绝
-        tn = np.sum((y_pred == 0) & (y_true == 0))  # 正确批准
-        fp = np.sum((y_pred == 1) & (y_true == 0))  # 错误拒绝
-        fn = np.sum((y_pred == 0) & (y_true == 1))  # 错误批准
+        # 计算混淆矩阵（注：y_pred=1 表示预测违约→拒绝；y_pred=0 表示预测正常→批准）
+        tp = np.sum((y_pred == 1) & (y_true == 1))  # 正确拒绝（真违约被拒）
+        tn = np.sum((y_pred == 0) & (y_true == 0))  # 正确批准（真正常被批准）
+        fp = np.sum((y_pred == 1) & (y_true == 0))  # 错误拒绝（正常客户被拒）
+        fn = np.sum((y_pred == 0) & (y_true == 1))  # 错误批准（违约客户被放过）
 
         # 批准的贷款(预测为好客户)
         approved_mask = (y_pred == 0)
@@ -108,8 +105,10 @@ class ModelROIEvaluator:
             'total_loss': expected_loss,
             'net_profit': net_profit,
             'total_principal': total_principal,
-            'precision': tn / (tn + fn) if (tn + fn) > 0 else 0,
-            'recall': tn / (tn + fp) if (tn + fp) > 0 else 0
+            'approval_precision': tn / (tn + fn) if (tn + fn) > 0 else 0,  # 批准客户中正常客户的比例
+            'approval_recall': tn / (tn + fp) if (tn + fp) > 0 else 0,     # 所有正常客户中被批准的比例
+            'rejection_precision': tp / (tp + fp) if (tp + fp) > 0 else 0,  # 拒绝客户中真违约的比例
+            'rejection_recall': tp / (tp + fn) if (tp + fn) > 0 else 0      # 所有违约客户中被拒绝的比例
         }
 
     def threshold_analysis(
@@ -415,13 +414,15 @@ class ModelROIEvaluator:
         axes[0].legend()
         axes[0].grid(True)
 
-        # 利润率曲线
-        profit_rate = profit_data['cumulative_profit'] / (customers * 1000)  # 假设平均每客户1000投资
-        axes[1].plot(customers, profit_rate * 100)
+        # 利润率曲线（基于累计本金而非硬编码假设）
+        cumulative_principal = np.cumsum(profit_data.get('cumulative_revenue', np.ones(len(customers))) / 0.15)  # 粗略反推本金
+        # 更好的方式：直接使用利润/累计客户数的比率
+        profit_per_customer = profit_data['cumulative_profit'] / customers
+        axes[1].plot(customers, profit_per_customer)
         axes[1].axhline(y=0, color='black', linestyle='-', alpha=0.3)
         axes[1].set_xlabel('Number of Customers (Ranked by Score)')
-        axes[1].set_ylabel('Profit Rate (%)')
-        axes[1].set_title('Profit Rate Curve')
+        axes[1].set_ylabel('Profit per Customer')
+        axes[1].set_title('Profit per Customer Curve')
         axes[1].grid(True)
 
         plt.tight_layout()

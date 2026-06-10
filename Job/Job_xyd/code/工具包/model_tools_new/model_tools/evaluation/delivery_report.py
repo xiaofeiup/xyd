@@ -5,7 +5,7 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
@@ -15,7 +15,7 @@ class ModelDeliveryReport:
     """模型交付报告生成器"""
 
     def __init__(self, data: pd.DataFrame, target_col: str = 'target',
-                 score_col: str = 'score', date_col: str = 'date',
+                 score_col: Union[str, List[str]] = 'score', date_col: str = 'date',
                  sample_type_col: str = 'sample_type'):
         """
         初始化报告生成器
@@ -23,15 +23,38 @@ class ModelDeliveryReport:
         Args:
             data: 包含预测结果的数据框
             target_col: 目标变量列名
-            score_col: 模型分数列名
+            score_col: 模型分数列名，支持两种形式：
+                       - str: 单个分数列（原有行为）
+                       - List[str]: 多个分数列。此时仅保留所有分数都不为空的样本，
+                         生成这些分数的整体对比报告（如KS_score1、AUC_score1等）
             date_col: 日期列名
             sample_type_col: 样本类型列名 (all, train, test, oot)
         """
         self.data = data.copy()
         self.target_col = target_col
-        self.score_col = score_col
+
+        # 规范化score_col：统一为列表形式，便于多分数处理
+        if isinstance(score_col, (list, tuple)):
+            self.score_cols = list(score_col)
+        else:
+            self.score_cols = [score_col]
+        self.is_multi_score = len(self.score_cols) > 1
+        # 主分数列（向后兼容：单分数方法默认使用第一个分数列）
+        self.score_col = self.score_cols[0]
+
         self.date_col = date_col
         self.sample_type_col = sample_type_col
+
+        # 多分数模式：仅保留所有分数都不为空的样本，生成整体报告
+        if self.is_multi_score:
+            missing_cols = [c for c in self.score_cols if c not in self.data.columns]
+            if missing_cols:
+                raise ValueError(f"以下分数列不存在于数据中: {missing_cols}")
+            before = len(self.data)
+            self.data = self.data.dropna(subset=self.score_cols).reset_index(drop=True)
+            after = len(self.data)
+            if after < before:
+                print(f"多分数模式：过滤掉 {before - after} 行存在缺失分数的样本，剩余 {after} 行")
 
         # 确保date列为datetime类型
         if date_col in self.data.columns:
@@ -432,6 +455,10 @@ class ModelDeliveryReport:
         """
         生成模型效果统计表
 
+        单分数模式下，输出列为 KS / AUC / TOP10_lift / PSI；
+        多分数模式下，每个分数对应一组指标列，列名带分数后缀，
+        如 KS_score1 / AUC_score1 / TOP10_lift_score1 / PSI_score1。
+
         Args:
             base_type: PSI计算的基准样本类型
 
@@ -440,12 +467,12 @@ class ModelDeliveryReport:
         """
         performance_stats = []
 
-        # 获取基准数据用于PSI计算
+        # 获取各分数的基准数据用于PSI计算
         if base_type in self.data[self.sample_type_col].values:
             base_data = self.data[self.data[self.sample_type_col] == base_type]
-            base_scores = base_data[self.score_col]
+            base_scores_map = {sc: base_data[sc] for sc in self.score_cols}
         else:
-            base_scores = None
+            base_scores_map = {sc: None for sc in self.score_cols}
 
         # 按样本类型统计
         sample_types = ['all'] + [t for t in self.data[self.sample_type_col].unique() if t != 'all']
@@ -464,30 +491,38 @@ class ModelDeliveryReport:
             total = len(sample_data)
             bad_rate = bad / total if total > 0 else 0
 
-            # 计算KS和AUC
-            ks = self._calculate_ks(sample_data[self.target_col], sample_data[self.score_col])
-            auc = self._calculate_auc(sample_data[self.target_col], sample_data[self.score_col])
-
-            # 计算PSI
-            if base_scores is not None and sample_type != base_type:
-                psi = self._calculate_psi(base_scores, sample_data[self.score_col])
-            else:
-                psi = 0.0
-
-            # 计算lift
-            df_lift, baseline_rate = self._calculate_lift_for_plot(sample_data[self.target_col], sample_data[self.score_col])
-
-            performance_stats.append({
+            row = {
                 '样本类型': sample_type,
                 'Good': good,
                 'Bad': bad,
                 'Total': total,
                 'Bad_Rate': f"{bad_rate:.4f}",
-                'KS': f"{ks:.4f}" if not pd.isna(ks) else "N/A",
-                'AUC': f"{auc:.4f}" if not pd.isna(auc) else "N/A",
-                'TOP10_lift':f"{df_lift.iloc[-1]['Lift']:.4f}" if len(df_lift) > 0 else "N/A",
-                'PSI': f"{psi:.4f}" if not pd.isna(psi) else "N/A"
-            })
+            }
+
+            # 对每个分数列分别计算指标
+            for sc in self.score_cols:
+                # 仅多分数模式添加后缀，单分数保持原列名
+                suffix = f"_{sc}" if self.is_multi_score else ""
+
+                ks = self._calculate_ks(sample_data[self.target_col], sample_data[sc])
+                auc = self._calculate_auc(sample_data[self.target_col], sample_data[sc])
+
+                base_scores = base_scores_map.get(sc)
+                if base_scores is not None and sample_type != base_type:
+                    psi = self._calculate_psi(base_scores, sample_data[sc])
+                else:
+                    psi = 0.0
+
+                df_lift, baseline_rate = self._calculate_lift_for_plot(
+                    sample_data[self.target_col], sample_data[sc]
+                )
+
+                row[f'KS{suffix}'] = f"{ks:.4f}" if not pd.isna(ks) else "N/A"
+                row[f'AUC{suffix}'] = f"{auc:.4f}" if not pd.isna(auc) else "N/A"
+                row[f'TOP10_lift{suffix}'] = f"{df_lift.iloc[-1]['Lift']:.4f}" if len(df_lift) > 0 else "N/A"
+                row[f'PSI{suffix}'] = f"{psi:.4f}" if not pd.isna(psi) else "N/A"
+
+            performance_stats.append(row)
 
         return pd.DataFrame(performance_stats)
 
@@ -522,118 +557,127 @@ class ModelDeliveryReport:
             'lift_details': []
         }
 
-        for sample_type in sample_types:
-            sample_data = self.data[self.data[self.sample_type_col] == sample_type]
+        for sc in self.score_cols:
+            score_suffix = f" - {sc}" if self.is_multi_score else ""
+            for sample_type in sample_types:
+                sample_data = self.data[self.data[self.sample_type_col] == sample_type]
 
-            if len(sample_data) == 0:
-                continue
+                if len(sample_data) == 0:
+                    continue
 
-            y_true = sample_data[self.target_col].values
-            y_prob = sample_data[self.score_col].values
+                y_true = sample_data[self.target_col].values
+                y_prob = sample_data[sc].values
 
-            # 计算统计量
-            ks_value, df_ks, ks_index = self._calculate_ks_for_plot(y_true, y_prob)
-            df_lift, baseline_rate = self._calculate_lift_for_plot(y_true, y_prob, n_bins)
+                # 计算统计量
+                ks_value, df_ks, ks_index = self._calculate_ks_for_plot(y_true, y_prob)
+                df_lift, baseline_rate = self._calculate_lift_for_plot(y_true, y_prob, n_bins)
 
-            # 计算AUC
-            try:
-                fpr, tpr, _ = roc_curve(y_true, y_prob)
-                roc_auc = auc(fpr, tpr)
-            except:
-                fpr, tpr = [0, 1], [0, 1]
-                roc_auc = np.nan
+                # 计算AUC
+                try:
+                    fpr, tpr, _ = roc_curve(y_true, y_prob)
+                    roc_auc = auc(fpr, tpr)
+                except:
+                    fpr, tpr = [0, 1], [0, 1]
+                    roc_auc = np.nan
 
-            # 创建综合图表
-            fig, axes = plt.subplots(2, 3, figsize=(20, 12))
-            fig.suptitle(f'{sample_type} 模型性能综合分析 (KS={ks_value:.3f})', fontsize=16, weight='bold')
+                # 创建综合图表
+                fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+                fig.suptitle(f'{sample_type}{score_suffix} 模型性能综合分析 (KS={ks_value:.3f})', fontsize=16, weight='bold')
 
-            # 1. KS曲线
-            x_axis = np.arange(len(df_ks)) / len(df_ks)
-            axes[0, 0].plot(x_axis, df_ks['cum_good_rate'], 'b-', label='累积好样本率')
-            axes[0, 0].plot(x_axis, df_ks['cum_bad_rate'], 'r-', label='累积坏样本率')
-            axes[0, 0].fill_between(x_axis, df_ks['cum_good_rate'], df_ks['cum_bad_rate'],
-                                    alpha=0.3, color='green')
-            max_ks_x = ks_index / len(df_ks)
-            axes[0, 0].axvline(x=max_ks_x, color='orange', linestyle='--', alpha=0.8)
-            axes[0, 0].set_title(f'KS曲线 (KS={ks_value:.3f})')
-            axes[0, 0].legend()
-            axes[0, 0].grid(True, alpha=0.3)
+                # 1. KS曲线
+                x_axis = np.arange(len(df_ks)) / len(df_ks)
+                axes[0, 0].plot(x_axis, df_ks['cum_good_rate'], 'b-', label='累积好样本率')
+                axes[0, 0].plot(x_axis, df_ks['cum_bad_rate'], 'r-', label='累积坏样本率')
+                axes[0, 0].fill_between(x_axis, df_ks['cum_good_rate'], df_ks['cum_bad_rate'],
+                                        alpha=0.3, color='green')
+                max_ks_x = ks_index / len(df_ks)
+                axes[0, 0].axvline(x=max_ks_x, color='orange', linestyle='--', alpha=0.8)
+                axes[0, 0].set_title(f'KS曲线 (KS={ks_value:.3f})')
+                axes[0, 0].legend()
+                axes[0, 0].grid(True, alpha=0.3)
 
-            # 2. Lift曲线
-            axes[0, 1].plot(df_lift['累积召回率'], df_lift['累积Lift'],
-                            'b-o', linewidth=2, markersize=6)
-            axes[0, 1].axhline(y=1, color='red', linestyle='--', alpha=0.7)
-            axes[0, 1].set_xlabel('累积召回率')
-            axes[0, 1].set_ylabel('累积Lift')
-            axes[0, 1].set_title('累积Lift曲线')
-            axes[0, 1].grid(True, alpha=0.3)
+                # 2. Lift曲线
+                axes[0, 1].plot(df_lift['累积召回率'], df_lift['累积Lift'],
+                                'b-o', linewidth=2, markersize=6)
+                axes[0, 1].axhline(y=1, color='red', linestyle='--', alpha=0.7)
+                axes[0, 1].set_xlabel('累积召回率')
+                axes[0, 1].set_ylabel('累积Lift')
+                axes[0, 1].set_title('累积Lift曲线')
+                axes[0, 1].grid(True, alpha=0.3)
 
-            # 3. ROC曲线
-            axes[0, 2].plot(fpr, tpr, 'b-', label=f'ROC (AUC={roc_auc:.3f})')
-            axes[0, 2].plot([0, 1], [0, 1], 'k--', alpha=0.5)
-            axes[0, 2].set_xlabel('假正率')
-            axes[0, 2].set_ylabel('真正率')
-            axes[0, 2].set_title('ROC曲线')
-            axes[0, 2].legend()
-            axes[0, 2].grid(True, alpha=0.3)
+                # 3. ROC曲线
+                axes[0, 2].plot(fpr, tpr, 'b-', label=f'ROC (AUC={roc_auc:.3f})')
+                axes[0, 2].plot([0, 1], [0, 1], 'k--', alpha=0.5)
+                axes[0, 2].set_xlabel('假正率')
+                axes[0, 2].set_ylabel('真正率')
+                axes[0, 2].set_title('ROC曲线')
+                axes[0, 2].legend()
+                axes[0, 2].grid(True, alpha=0.3)
 
-            # 4. 分箱Lift
-            axes[1, 0].bar(df_lift['分箱'], df_lift['Lift'],
-                           color='skyblue', alpha=0.7, edgecolor='navy')
-            axes[1, 0].axhline(y=1, color='red', linestyle='--', alpha=0.7)
-            axes[1, 0].set_xlabel('分箱')
-            axes[1, 0].set_ylabel('Lift值')
-            axes[1, 0].set_title('各分箱Lift值')
-            axes[1, 0].grid(True, alpha=0.3)
+                # 4. 分箱Lift
+                axes[1, 0].bar(df_lift['分箱'], df_lift['Lift'],
+                               color='skyblue', alpha=0.7, edgecolor='navy')
+                axes[1, 0].axhline(y=1, color='red', linestyle='--', alpha=0.7)
+                axes[1, 0].set_xlabel('分箱')
+                axes[1, 0].set_ylabel('Lift值')
+                axes[1, 0].set_title('各分箱Lift值')
+                axes[1, 0].grid(True, alpha=0.3)
 
-            # 5. 概率分布
-            axes[1, 1].hist(y_prob[y_true == 0], bins=30, alpha=0.6, label='负样本',
-                            color='blue', density=True)
-            axes[1, 1].hist(y_prob[y_true == 1], bins=30, alpha=0.6, label='正样本',
-                            color='red', density=True)
-            axes[1, 1].set_xlabel('预测概率')
-            axes[1, 1].set_ylabel('密度')
-            axes[1, 1].set_title('样本概率分布')
-            axes[1, 1].legend()
-            axes[1, 1].grid(True, alpha=0.3)
+                # 5. 概率分布
+                axes[1, 1].hist(y_prob[y_true == 0], bins=30, alpha=0.6, label='负样本',
+                                color='blue', density=True)
+                axes[1, 1].hist(y_prob[y_true == 1], bins=30, alpha=0.6, label='正样本',
+                                color='red', density=True)
+                axes[1, 1].set_xlabel('预测概率')
+                axes[1, 1].set_ylabel('密度')
+                axes[1, 1].set_title('样本概率分布')
+                axes[1, 1].legend()
+                axes[1, 1].grid(True, alpha=0.3)
 
-            # 6. 增益图
-            random_line = np.linspace(0, 1, len(df_lift))
-            axes[1, 2].plot(df_lift['累积召回率'], df_lift['累积召回率'],
-                            'b-o', linewidth=2, label='模型增益')
-            axes[1, 2].plot(random_line, random_line, 'r--', alpha=0.7, label='随机模型')
-            axes[1, 2].fill_between(df_lift['累积召回率'], random_line[:len(df_lift)],
-                                    df_lift['累积召回率'], alpha=0.3, color='green')
-            axes[1, 2].set_xlabel('样本比例')
-            axes[1, 2].set_ylabel('捕获正样本比例')
-            axes[1, 2].set_title('增益图')
-            axes[1, 2].legend()
-            axes[1, 2].grid(True, alpha=0.3)
+                # 6. 增益图
+                random_line = np.linspace(0, 1, len(df_lift))
+                axes[1, 2].plot(df_lift['累积召回率'], df_lift['累积召回率'],
+                                'b-o', linewidth=2, label='模型增益')
+                axes[1, 2].plot(random_line, random_line, 'r--', alpha=0.7, label='随机模型')
+                axes[1, 2].fill_between(df_lift['累积召回率'], random_line[:len(df_lift)],
+                                        df_lift['累积召回率'], alpha=0.3, color='green')
+                axes[1, 2].set_xlabel('样本比例')
+                axes[1, 2].set_ylabel('捕获正样本比例')
+                axes[1, 2].set_title('增益图')
+                axes[1, 2].legend()
+                axes[1, 2].grid(True, alpha=0.3)
 
-            plt.tight_layout()
+                plt.tight_layout()
 
-            # 保存图片
-            img_path = os.path.join(save_dir, f'metric_report_{sample_type}.png')
-            fig.savefig(img_path, dpi=150, bbox_inches='tight')
-            plt.close(fig)
+                # 保存图片（多分数模式下文件名和key包含分数名）
+                image_key = f'{sample_type}_{sc}' if self.is_multi_score else sample_type
+                img_path = os.path.join(save_dir, f'metric_report_{image_key}.png')
+                fig.savefig(img_path, dpi=150, bbox_inches='tight')
+                plt.close(fig)
 
-            result['images'][sample_type] = img_path
+                result['images'][image_key] = img_path
 
-            # 保存汇总指标
-            result['metrics_summary'].append({
-                '样本类型': sample_type,
-                '样本量': len(sample_data),
-                '正样本数': int(y_true.sum()),
-                '正样本率': f"{baseline_rate:.4f}",
-                'KS': f"{ks_value:.4f}" if not pd.isna(ks_value) else "N/A",
-                'AUC': f"{roc_auc:.4f}" if not pd.isna(roc_auc) else "N/A",
-                'Top10%_Lift': f"{df_lift.iloc[-1]['Lift']:.4f}" if len(df_lift) > 0 else "N/A"
-            })
+                # 保存汇总指标
+                metrics_row = {}
+                if self.is_multi_score:
+                    metrics_row['分数'] = sc
+                metrics_row.update({
+                    '样本类型': sample_type,
+                    '样本量': len(sample_data),
+                    '正样本数': int(y_true.sum()),
+                    '正样本率': f"{baseline_rate:.4f}",
+                    'KS': f"{ks_value:.4f}" if not pd.isna(ks_value) else "N/A",
+                    'AUC': f"{roc_auc:.4f}" if not pd.isna(roc_auc) else "N/A",
+                    'Top10%_Lift': f"{df_lift.iloc[-1]['Lift']:.4f}" if len(df_lift) > 0 else "N/A"
+                })
+                result['metrics_summary'].append(metrics_row)
 
-            # 保存Lift详情
-            df_lift_copy = df_lift.copy()
-            df_lift_copy['样本类型'] = sample_type
-            result['lift_details'].append(df_lift_copy)
+                # 保存Lift详情
+                df_lift_copy = df_lift.copy()
+                if self.is_multi_score:
+                    df_lift_copy['分数'] = sc
+                df_lift_copy['样本类型'] = sample_type
+                result['lift_details'].append(df_lift_copy)
 
         return result
 
@@ -728,105 +772,115 @@ class ModelDeliveryReport:
         else:
             all_data = self.data
 
-        # 根据分箱方式选择分箱函数
-        _, bin_edges = self._create_bins(all_data[self.score_col], bins=bins, bin_method=bin_method, retbins=True)
+        # 对每个分数列分别进行分箱分析
+        for sc in self.score_cols:
+            # 根据分箱方式选择分箱函数
+            _, bin_edges = self._create_bins(all_data[sc], bins=bins, bin_method=bin_method, retbins=True)
 
-        for sample_type in sample_types:
-            if sample_type == 'all':
-                sample_data = self.data
-            else:
-                sample_data = self.data[self.data[self.sample_type_col] == sample_type]
+            for sample_type in sample_types:
+                if sample_type == 'all':
+                    sample_data = self.data
+                else:
+                    sample_data = self.data[self.data[self.sample_type_col] == sample_type]
 
-            if len(sample_data) == 0:
-                continue
+                if len(sample_data) == 0:
+                    continue
 
-            # 分箱
-            sample_data_copy = sample_data.copy()
-            sample_data_copy['score_bin'] = pd.cut(sample_data_copy[self.score_col],
-                                                  bins=bin_edges, include_lowest=True)
+                # 分箱
+                sample_data_copy = sample_data.copy()
+                sample_data_copy['score_bin'] = pd.cut(sample_data_copy[sc],
+                                                      bins=bin_edges, include_lowest=True)
 
-            # 按分箱统计
-            bin_stats = sample_data_copy.groupby('score_bin').agg({
-                self.target_col: ['count', 'sum', 'mean']
-            }).round(4)
+                # 按分箱统计
+                bin_stats = sample_data_copy.groupby('score_bin').agg({
+                    self.target_col: ['count', 'sum', 'mean']
+                }).round(4)
 
-            bin_stats.columns = ['total_users', 'bad_users', 'bad_rate']
-            bin_stats['good_users'] = bin_stats['total_users'] - bin_stats['bad_users']
-            bin_stats['total_pct'] = bin_stats['total_users'] / len(sample_data)
-            bin_stats['bad_pct'] = bin_stats['bad_users'] / bin_stats['bad_users'].sum()
+                bin_stats.columns = ['total_users', 'bad_users', 'bad_rate']
+                bin_stats['good_users'] = bin_stats['total_users'] - bin_stats['bad_users']
+                bin_stats['total_pct'] = bin_stats['total_users'] / len(sample_data)
+                bin_stats['bad_pct'] = bin_stats['bad_users'] / bin_stats['bad_users'].sum()
 
-            # 计算累计指标
-            bin_stats = bin_stats.sort_index(ascending=False)  # 按分数降序
-            bin_stats['cum_bad_rate'] = (bin_stats['bad_users'].cumsum() /
-                                       bin_stats['total_users'].cumsum())
-            bin_stats['cum_bad_pct'] = bin_stats['bad_users'].cumsum() / bin_stats['bad_users'].sum()
+                # 计算累计指标
+                bin_stats = bin_stats.sort_index(ascending=False)  # 按分数降序
+                bin_stats['cum_bad_rate'] = (bin_stats['bad_users'].cumsum() /
+                                           bin_stats['total_users'].cumsum())
+                bin_stats['cum_bad_pct'] = bin_stats['bad_users'].cumsum() / bin_stats['bad_users'].sum()
 
-            # 计算KS和LIFT
-            bin_stats['ks'] = np.abs(bin_stats['cum_bad_pct'] -
-                                   (bin_stats['total_users'].cumsum() / bin_stats['total_users'].sum()))
-            bin_stats['lift'] = bin_stats['bad_rate'] / (bin_stats['bad_users'].sum() / bin_stats['total_users'].sum())
+                # 计算KS和LIFT
+                bin_stats['ks'] = np.abs(bin_stats['cum_bad_pct'] -
+                                       (bin_stats['total_users'].cumsum() / bin_stats['total_users'].sum()))
+                bin_stats['lift'] = bin_stats['bad_rate'] / (bin_stats['bad_users'].sum() / bin_stats['total_users'].sum())
 
-            # PSI计算（与all样本对比）
-            if sample_type != 'all':
-                all_sample_data = self.data.copy()
-                all_sample_data['score_bin'] = pd.cut(all_sample_data[self.score_col],
-                                                    bins=bin_edges, include_lowest=True)
-                all_bin_pct = all_sample_data.groupby('score_bin').size() / len(all_sample_data)
-                current_bin_pct = bin_stats['total_pct']
+                # PSI计算（与all样本对比）
+                if sample_type != 'all':
+                    all_sample_data = self.data.copy()
+                    all_sample_data['score_bin'] = pd.cut(all_sample_data[sc],
+                                                        bins=bin_edges, include_lowest=True)
+                    all_bin_pct = all_sample_data.groupby('score_bin').size() / len(all_sample_data)
+                    current_bin_pct = bin_stats['total_pct']
 
-                # 确保索引一致
-                all_bin_pct = all_bin_pct.reindex(current_bin_pct.index, fill_value=0.001)
-                current_bin_pct = current_bin_pct.fillna(0.001)
+                    # 确保索引一致
+                    all_bin_pct = all_bin_pct.reindex(current_bin_pct.index, fill_value=0.001)
+                    current_bin_pct = current_bin_pct.fillna(0.001)
 
-                psi_values = (current_bin_pct - all_bin_pct) * np.log(current_bin_pct / all_bin_pct)
-            else:
-                psi_values = pd.Series([0] * len(bin_stats), index=bin_stats.index)
+                    psi_values = (current_bin_pct - all_bin_pct) * np.log(current_bin_pct / all_bin_pct)
+                else:
+                    psi_values = pd.Series([0] * len(bin_stats), index=bin_stats.index)
 
-            bin_stats['psi'] = psi_values
+                bin_stats['psi'] = psi_values
 
-            # 重新排序列
-            bin_stats = bin_stats[['good_users', 'bad_users', 'total_users', 'total_pct',
-                                 'bad_pct', 'bad_rate', 'ks', 'lift', 'cum_bad_rate',
-                                 'cum_bad_pct', 'psi']]
+                # 重新排序列
+                bin_stats = bin_stats[['good_users', 'bad_users', 'total_users', 'total_pct',
+                                     'bad_pct', 'bad_rate', 'ks', 'lift', 'cum_bad_rate',
+                                     'cum_bad_pct', 'psi']]
 
-            # 添加样本类型信息
-            for idx, row in bin_stats.iterrows():
-                bin_analysis.append({
+                # 添加样本类型信息
+                for idx, row in bin_stats.iterrows():
+                    record = {}
+                    if self.is_multi_score:
+                        record['分数'] = sc
+                    record.update({
+                        '样本类型': sample_type,
+                        '分箱': str(idx),
+                        '好用户': int(row['good_users']),
+                        '坏用户': int(row['bad_users']),
+                        '总用户': int(row['total_users']),
+                        '总用户占比': f"{row['total_pct']:.4f}",
+                        '坏用户占比': f"{row['bad_pct']:.4f}",
+                        '坏用户率': f"{row['bad_rate']:.4f}",
+                        'KS': f"{row['ks']:.4f}",
+                        'LIFT': f"{row['lift']:.4f}",
+                        '累计坏用户率': f"{row['cum_bad_rate']:.4f}",
+                        '累计坏用户占比': f"{row['cum_bad_pct']:.4f}",
+                        'PSI稳定性': f"{row['psi']:.4f}"
+                    })
+                    bin_analysis.append(record)
+
+                # 添加总计行
+                total_good = bin_stats['good_users'].sum()
+                total_bad = bin_stats['bad_users'].sum()
+                total_total = bin_stats['total_users'].sum()
+
+                total_record = {}
+                if self.is_multi_score:
+                    total_record['分数'] = sc
+                total_record.update({
                     '样本类型': sample_type,
-                    '分箱': str(idx),
-                    '好用户': int(row['good_users']),
-                    '坏用户': int(row['bad_users']),
-                    '总用户': int(row['total_users']),
-                    '总用户占比': f"{row['total_pct']:.4f}",
-                    '坏用户占比': f"{row['bad_pct']:.4f}",
-                    '坏用户率': f"{row['bad_rate']:.4f}",
-                    'KS': f"{row['ks']:.4f}",
-                    'LIFT': f"{row['lift']:.4f}",
-                    '累计坏用户率': f"{row['cum_bad_rate']:.4f}",
-                    '累计坏用户占比': f"{row['cum_bad_pct']:.4f}",
-                    'PSI稳定性': f"{row['psi']:.4f}"
+                    '分箱': '总计',
+                    '好用户': int(total_good),
+                    '坏用户': int(total_bad),
+                    '总用户': int(total_total),
+                    '总用户占比': "1.0000",
+                    '坏用户占比': "1.0000",
+                    '坏用户率': f"{total_bad/total_total:.4f}" if total_total > 0 else "0.0000",
+                    'KS': f"{bin_stats['ks'].max():.4f}",
+                    'LIFT': "N/A",
+                    '累计坏用户率': f"{total_bad/total_total:.4f}" if total_total > 0 else "0.0000",
+                    '累计坏用户占比': "1.0000",
+                    'PSI稳定性': f"{bin_stats['psi'].sum():.4f}"
                 })
-
-            # 添加总计行
-            total_good = bin_stats['good_users'].sum()
-            total_bad = bin_stats['bad_users'].sum()
-            total_total = bin_stats['total_users'].sum()
-
-            bin_analysis.append({
-                '样本类型': sample_type,
-                '分箱': '总计',
-                '好用户': int(total_good),
-                '坏用户': int(total_bad),
-                '总用户': int(total_total),
-                '总用户占比': "1.0000",
-                '坏用户占比': "1.0000",
-                '坏用户率': f"{total_bad/total_total:.4f}" if total_total > 0 else "0.0000",
-                'KS': f"{bin_stats['ks'].max():.4f}",
-                'LIFT': "N/A",
-                '累计坏用户率': f"{total_bad/total_total:.4f}" if total_total > 0 else "0.0000",
-                '累计坏用户占比': "1.0000",
-                'PSI稳定性': f"{bin_stats['psi'].sum():.4f}"
-            })
+                bin_analysis.append(total_record)
 
         return pd.DataFrame(bin_analysis)
 
@@ -1304,85 +1358,91 @@ class ModelDeliveryReport:
         months = sorted(self.data['Month'].unique())
         month_strs = [str(m) for m in months]
 
-        # 对模型分进行分箱
-        try:
-            self.data['score_bin'] = self._create_bins(self.data[self.score_col], bins=bins, bin_method=bin_method)
-            bin_labels = self.data['score_bin'].cat.categories
-        except:
-            return pd.DataFrame()
-
         distribution_results = []
 
-        # 按分箱统计
-        for bin_label in bin_labels:
-            bin_data = self.data[self.data['score_bin'] == bin_label]
-            if len(bin_data) == 0:
+        # 对每个分数列分别进行分箱分析
+        for sc in self.score_cols:
+            # 对模型分进行分箱
+            try:
+                bin_col = f'{sc}_score_bin'
+                self.data[bin_col] = self._create_bins(self.data[sc], bins=bins, bin_method=bin_method)
+                bin_labels = self.data[bin_col].cat.categories
+            except:
                 continue
 
-            # 创建结果字典，按指定顺序
-            result = {}
+            # 多分数模式下，特征名用分数列名区分
+            feature_label = sc if self.is_multi_score else '模型分'
 
-            # 1. 数据类型和分箱
-            result['特征'] = '模型分'
-            result['score_bin'] = str(bin_label)
+            # 按分箱统计
+            for bin_label in bin_labels:
+                bin_data = self.data[self.data[bin_col] == bin_label]
+                if len(bin_data) == 0:
+                    continue
 
-            # 按月统计数据
-            monthly_data = {}
-            total_num = 0
-            total_bad = 0
+                # 创建结果字典，按指定顺序
+                result = {}
 
-            for month in months:
-                month_data = bin_data[bin_data['Month'] == month]
-                month_str = str(month)
+                # 1. 数据类型和分箱
+                result['特征'] = feature_label
+                result['score_bin'] = str(bin_label)
 
-                num = len(month_data)
-                bad_num = (month_data[self.target_col] == 1).sum()
-                bad_ratio = bad_num / num if num > 0 else 0
-                lift = (bad_ratio / (self.data[self.target_col].mean())) if num > 0 else 0
+                # 按月统计数据
+                monthly_data = {}
+                total_num = 0
+                total_bad = 0
 
-                monthly_data[month_str] = {
-                    'num': num,
-                    'bad_num': bad_num,
-                    'bad_ratio': bad_ratio,
-                    'lift': lift
-                }
+                for month in months:
+                    month_data = bin_data[bin_data['Month'] == month]
+                    month_str = str(month)
 
-                total_num += num
-                total_bad += bad_num
+                    num = len(month_data)
+                    bad_num = (month_data[self.target_col] == 1).sum()
+                    bad_ratio = bad_num / num if num > 0 else 0
+                    lift = (bad_ratio / (self.data[self.target_col].mean())) if num > 0 else 0
 
-            # 2. 各月的num (n列)
-            for month in months:
-                month_str = str(month)
-                result[f'num_{month_str}'] = monthly_data[month_str]['num']
+                    monthly_data[month_str] = {
+                        'num': num,
+                        'bad_num': bad_num,
+                        'bad_ratio': bad_ratio,
+                        'lift': lift
+                    }
 
-            # 3. 合计数量
-            result['合计数量'] = total_num
+                    total_num += num
+                    total_bad += bad_num
 
-            # 4. 各月的ratio (n列) - 该分箱在该月的样本数占全部样本总数的比例
-            for month in months:
-                month_str = str(month)
-                ratio = monthly_data[month_str]['num'] / len(self.data) if len(self.data) > 0 else 0
-                result[f'ratio_{month_str}'] = f"{ratio:.4f}"
+                # 2. 各月的num (n列)
+                for month in months:
+                    month_str = str(month)
+                    result[f'num_{month_str}'] = monthly_data[month_str]['num']
 
-            # 5. 合计占比
-            result['合计占比'] = f"{total_num / len(self.data):.4f}"
+                # 3. 合计数量
+                result['合计数量'] = total_num
 
-            # 6. 各月的bad_ratio (n列)
-            for month in months:
-                month_str = str(month)
-                result[f'bad_ratio_{month_str}'] = f"{monthly_data[month_str]['bad_ratio']:.4f}"
+                # 4. 各月的ratio (n列) - 该分箱在该月的样本数占全部样本总数的比例
+                for month in months:
+                    month_str = str(month)
+                    ratio = monthly_data[month_str]['num'] / len(self.data) if len(self.data) > 0 else 0
+                    result[f'ratio_{month_str}'] = f"{ratio:.4f}"
 
-            # 7. 各月的bad_num (n列)
-            for month in months:
-                month_str = str(month)
-                result[f'bad_num_{month_str}'] = monthly_data[month_str]['bad_num']
+                # 5. 合计占比
+                result['合计占比'] = f"{total_num / len(self.data):.4f}"
 
-            # 8. 各月的lift (n列)
-            for month in months:
-                month_str = str(month)
-                result[f'lift_{month_str}'] = f"{monthly_data[month_str]['lift']:.4f}"
+                # 6. 各月的bad_ratio (n列)
+                for month in months:
+                    month_str = str(month)
+                    result[f'bad_ratio_{month_str}'] = f"{monthly_data[month_str]['bad_ratio']:.4f}"
 
-            distribution_results.append(result)
+                # 7. 各月的bad_num (n列)
+                for month in months:
+                    month_str = str(month)
+                    result[f'bad_num_{month_str}'] = monthly_data[month_str]['bad_num']
+
+                # 8. 各月的lift (n列)
+                for month in months:
+                    month_str = str(month)
+                    result[f'lift_{month_str}'] = f"{monthly_data[month_str]['lift']:.4f}"
+
+                distribution_results.append(result)
 
         return pd.DataFrame(distribution_results)
 

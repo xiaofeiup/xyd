@@ -6,8 +6,7 @@
 
 import pandas as pd
 import numpy as np
-import warnings
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
 
@@ -43,6 +42,8 @@ class FeatureDriftDetector:
         self.min_sample = min_sample
         self.baseline_data = None
         self.drift_history = []
+        self.baseline_stats: Dict[str, Dict[str, Any]] = {}
+        self.feature_psi_details: Dict[str, Any] = {}
 
     def set_baseline(self, baseline_data: pd.DataFrame) -> None:
         """
@@ -57,6 +58,7 @@ class FeatureDriftDetector:
             self.feature_names = baseline_data.select_dtypes(include=[np.number]).columns.tolist()
 
         self.baseline_data = baseline_data[self.feature_names].copy()
+        self.baseline_stats = self._compute_baseline_stats(self.baseline_data)
 
     def detect_drift(self,
                     current_data: pd.DataFrame,
@@ -79,48 +81,109 @@ class FeatureDriftDetector:
         if self.baseline_data is None:
             raise ValueError("请先设置基准数据")
 
-        from ..evaluation.metrics import calculate_psi, calculate_multi_feature_psi
+        self.feature_psi_details = {}
 
-        # 计算PSI
-        psi_results = calculate_multi_feature_psi(
-            self.baseline_data,
-            current_data[self.feature_names],
-            features=self.feature_names,
-            bins=self.bins,
-            min_sample=self.min_sample
-        )
+        psi_summary_records = []
+        feature_details = {}
 
-        # 识别漂移特征
-        drifted_features = psi_results[
-            psi_results['psi_value'] >= self.psi_threshold
+        current_subset = current_data[self.feature_names]
+
+        for feature in self.feature_names:
+            psi_value, psi_detail = self._compute_feature_psi(
+                self.baseline_data[feature],
+                current_subset[feature],
+                feature
+            )
+
+            feature_details[feature] = (
+                psi_detail.to_dict('records') if psi_detail is not None else None
+            )
+            self.feature_psi_details[feature] = feature_details[feature]
+
+            psi_summary_records.append({
+                'feature': feature,
+                'psi_value': psi_value,
+                'interpretation': self._interpret_psi_value(psi_value),
+                'stability_level': self._stability_level(psi_value)
+            })
+
+        psi_summary_df = pd.DataFrame(psi_summary_records)
+
+        drifted_features = psi_summary_df[
+            psi_summary_df['psi_value'] >= self.psi_threshold
         ]
 
-        # 生成漂移报告
         drift_alerts = []
-        for _, feature in drifted_features.iterrows():
-            severity = 'HIGH' if feature['psi_value'] > 0.5 else 'MEDIUM'
+        for _, feature_row in drifted_features.iterrows():
+            severity = 'HIGH' if feature_row['psi_value'] > 0.5 else 'MEDIUM'
             drift_alerts.append({
-                'feature': feature['feature'],
-                'psi_value': feature['psi_value'],
-                'interpretation': feature['interpretation'],
+                'feature': feature_row['feature'],
+                'psi_value': feature_row['psi_value'],
+                'interpretation': feature_row['interpretation'],
                 'severity': severity
             })
 
-        # 构建结果
         result = {
             'timestamp': timestamp or datetime.now().isoformat(),
-            'total_features': len(psi_results),
+            'total_features': len(psi_summary_df),
             'drifted_features': len(drifted_features),
-            'drift_rate': len(drifted_features) / len(psi_results),
-            'psi_summary': psi_results.to_dict('records'),
+            'drift_rate': len(drifted_features) / len(psi_summary_df) if len(psi_summary_df) > 0 else 0.0,
+            'psi_summary': psi_summary_df.to_dict('records'),
             'drift_alerts': drift_alerts,
-            'overall_status': self._get_overall_status(len(drifted_features), len(psi_results))
+            'overall_status': self._get_overall_status(len(drifted_features), len(psi_summary_df)),
+            'feature_details': feature_details,
+            'baseline_stats': self.baseline_stats
         }
 
         # 记录历史
         self.drift_history.append(result)
 
         return result
+
+    def _compute_baseline_stats(self, baseline: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+        stats = {}
+        for feature in baseline.columns:
+            series = baseline[feature].dropna()
+            stats[feature] = {
+                'mean': float(series.mean()) if not series.empty else np.nan,
+                'std': float(series.std()) if not series.empty else np.nan,
+                'min': float(series.min()) if not series.empty else np.nan,
+                'max': float(series.max()) if not series.empty else np.nan,
+                'count': int(series.size)
+            }
+        return stats
+
+    def _compute_feature_psi(self,
+                             baseline_series: pd.Series,
+                             current_series: pd.Series,
+                             feature_name: str) -> Tuple[float, Optional[pd.DataFrame]]:
+        from ..evaluation.metrics import calculate_psi
+
+        psi_value, psi_detail = calculate_psi(
+            baseline_series,
+            current_series,
+            bins=self.bins,
+            min_sample=self.min_sample,
+            feature_name=feature_name
+        )
+
+        return psi_value, psi_detail
+
+    def _calculate_psi_for_feature(self,
+                                   baseline_series: pd.Series,
+                                   current_series: pd.Series,
+                                   feature_name: str) -> float:
+        psi_value, psi_detail = self._compute_feature_psi(
+            baseline_series,
+            current_series,
+            feature_name
+        )
+
+        self.feature_psi_details[feature_name] = (
+            psi_detail.to_dict('records') if psi_detail is not None else None
+        )
+
+        return psi_value
 
     def _get_overall_status(self, drifted_count: int, total_count: int) -> str:
         """
@@ -148,6 +211,59 @@ class FeatureDriftDetector:
             return "MODERATE_DRIFT"
         else:
             return "SEVERE_DRIFT"
+
+    @staticmethod
+    def _interpret_psi_value(psi_value: float) -> str:
+        if pd.isna(psi_value):
+            return "无效值"
+        if psi_value < 0.1:
+            return "稳定 (变化很小)"
+        if psi_value < 0.2:
+            return "轻微变化"
+        if psi_value < 0.25:
+            return "中等变化 (需要关注)"
+        return "显著变化 (需要重新建模)"
+
+    @staticmethod
+    def _stability_level(psi_value: float) -> int:
+        if pd.isna(psi_value):
+            return 0
+        if psi_value < 0.1:
+            return 1
+        if psi_value < 0.2:
+            return 2
+        if psi_value < 0.25:
+            return 3
+        return 4
+
+    def get_drift_summary(self, last_n: Optional[int] = None) -> Dict[str, Any]:
+        """汇总漂移检测历史。"""
+        if not self.drift_history:
+            return {
+                'total_detections': 0,
+                'drift_alert_count': 0,
+                'feature_alert_counts': {},
+                'last_status': None,
+                'last_timestamp': None
+            }
+
+        history = self.drift_history[-last_n:] if last_n else self.drift_history
+
+        feature_alert_counts: Dict[str, int] = {}
+        for record in history:
+            for alert in record.get('drift_alerts', []):
+                feature = alert['feature']
+                feature_alert_counts[feature] = feature_alert_counts.get(feature, 0) + 1
+
+        last_record = history[-1]
+
+        return {
+            'total_detections': len(self.drift_history),
+            'drift_alert_count': sum(len(r.get('drift_alerts', [])) for r in history),
+            'feature_alert_counts': feature_alert_counts,
+            'last_status': last_record.get('overall_status'),
+            'last_timestamp': last_record.get('timestamp')
+        }
 
     def get_drift_trend(self, days: int = 30) -> pd.DataFrame:
         """

@@ -302,24 +302,28 @@ class LogisticRegressionSpace(ParameterSpace):
     ) -> Dict[str, Any]:
         """LogisticRegression参数建议"""
         solver = trial.suggest_categorical('solver', ['liblinear', 'saga', 'lbfgs'])
-        # 注：sklearn>=1.2 已移除字符串 'none'，无正则时须使用 penalty=None。
-        # 这里用占位字符串 'none' 进行类别采样（Optuna 需要可哈希的固定类别），
-        # 随后在组装参数时映射为 None。
+        # 关键：penalty 的可选值依赖 solver，但 Optuna 要求“同名 categorical 参数”的
+        # 候选集在所有 trial 间保持一致，否则报 “does not support dynamic value space”。
+        # 因此为每个 solver 使用独立的参数名，各自拥有固定候选集。
+        # 同时直接用 None（sklearn>=1.2 表示无正则），避免 'none' 字符串引发的报错。
         if solver == 'lbfgs':
-            penalty = trial.suggest_categorical('penalty', ['l2', 'none'])
+            penalty = trial.suggest_categorical('penalty_lbfgs', ['l2', None])
         elif solver == 'liblinear':
             # liblinear 不支持无正则（penalty=None）
-            penalty = trial.suggest_categorical('penalty', ['l1', 'l2'])
+            penalty = trial.suggest_categorical('penalty_liblinear', ['l1', 'l2'])
         else:  # saga
-            penalty = trial.suggest_categorical('penalty', ['l1', 'l2', 'elasticnet', 'none'])
+            penalty = trial.suggest_categorical('penalty_saga', ['l1', 'l2', 'elasticnet', None])
 
         params = {
-            'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
-            'penalty': None if penalty == 'none' else penalty,
+            'penalty': penalty,
             'solver': solver,
             'max_iter': trial.suggest_int('max_iter', 100, 1000),
             'random_state': 42,
         }
+
+        # penalty=None 时 C 会被忽略，不传入以避免 sklearn 警告
+        if penalty is not None:
+            params['C'] = trial.suggest_float('C', 1e-4, 1e2, log=True)
 
         # elasticnet约束：仅 elasticnet 需要 l1_ratio
         if penalty == 'elasticnet':

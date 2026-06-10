@@ -123,7 +123,7 @@ def clean_column_names(data: pd.DataFrame,
     data_cleaned = data.copy()
 
     new_columns = []
-    for col in data.columns:
+    for idx, col in enumerate(data.columns):
         new_col = str(col)
 
         if remove_special_chars:
@@ -133,6 +133,11 @@ def clean_column_names(data: pd.DataFrame,
 
         if to_lowercase:
             new_col = new_col.lower()
+
+        new_col = new_col.strip('_')
+
+        if not new_col:
+            new_col = f"column_{idx}"
 
         # 确保列名不以数字开头
         if new_col[0].isdigit():

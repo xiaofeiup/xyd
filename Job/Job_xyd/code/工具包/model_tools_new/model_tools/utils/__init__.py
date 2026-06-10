@@ -43,6 +43,21 @@ from .decorators import (
     ml_function
 )
 
+from .memory_tools import (
+    whos
+)
+
+from .model_scores_db import (
+    init_score_db,
+    ensure_indexes,
+    write_model_scores,
+    import_csv_to_db,
+    read_model_scores,
+    SCORE_TABLE_SCHEMA,
+    DEFAULT_DB_PATH,
+    DEFAULT_TABLE_NAME
+)
+
 __all__ = [
     # 数据处理
     'check_data_quality',
@@ -77,5 +92,18 @@ __all__ = [
     'deprecated',
     'monitor_performance',
     'rate_limit',
-    'ml_function'
+    'ml_function',
+
+    # 内存分析
+    'whos',
+
+    # 模型分数数据库
+    'init_score_db',
+    'ensure_indexes',
+    'write_model_scores',
+    'import_csv_to_db',
+    'read_model_scores',
+    'SCORE_TABLE_SCHEMA',
+    'DEFAULT_DB_PATH',
+    'DEFAULT_TABLE_NAME'
 ]

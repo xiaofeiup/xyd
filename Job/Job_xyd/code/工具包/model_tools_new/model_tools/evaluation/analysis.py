@@ -99,16 +99,28 @@ class ModelAnalyzer:
             'feature_stability': {}
         }
 
-        # 计算每个特征的影响
-        for feature in X.columns[:top_k]:
-            feature_analysis['feature_impact'][feature] = self._analyze_single_feature_impact(
+        # 先对所有特征计算影响度，然后选取 top_k
+        all_impacts = {}
+        for feature in X.columns:
+            all_impacts[feature] = self._analyze_single_feature_impact(
                 X[feature], y, y_scores
             )
 
-        # 分析特征交互
-        if len(X.columns) >= 2:
+        # 按 importance_score 降序选出真正的 top_k 特征
+        sorted_features = sorted(
+            all_impacts.items(),
+            key=lambda item: abs(item[1].get('importance_score', 0)),
+            reverse=True
+        )[:top_k]
+
+        feature_analysis['feature_impact'] = {feat: impact for feat, impact in sorted_features}
+        top_feature_names = [feat for feat, _ in sorted_features]
+
+        # 分析 top 特征之间的交互
+        if len(top_feature_names) >= 2:
+            interaction_cols = top_feature_names[:min(5, len(top_feature_names))]
             feature_analysis['feature_interactions'] = self._analyze_feature_interactions(
-                X.iloc[:, :min(5, len(X.columns))], y
+                X[interaction_cols], y
             )
 
         # 分析特征稳定性
@@ -372,7 +384,7 @@ class ModelAnalyzer:
     def _analyze_score_stability(self, y_true: np.ndarray, y_scores: np.ndarray) -> Dict:
         """分析评分稳定性"""
         # 将数据分成时间段进行稳定性分析（假设数据按时间排序）
-        n_segments = min(5, len(y_scores) // 100)  # 至少100个样本一段
+        n_segments = max(1, min(5, len(y_scores) // 100))  # 至少1段，每段至少100样本
         segment_size = len(y_scores) // n_segments
 
         segment_aucs = []

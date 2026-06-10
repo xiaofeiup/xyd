@@ -7,7 +7,7 @@
 import pandas as pd
 import numpy as np
 import warnings
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from sklearn.metrics import (
     roc_auc_score, mean_squared_error, mean_absolute_error,
     r2_score, explained_variance_score, median_absolute_error,
@@ -79,8 +79,8 @@ def calculate_ks(y_true: np.ndarray, y_prob: np.ndarray) -> Tuple[float, pd.Data
     df['cum_good_rate'] = df['cum_good'] / total_good  # TPR
     df['cum_bad_rate'] = df['cum_bad'] / total_bad    # FPR
 
-    # 计算KS值
-    df['ks'] = df['cum_bad_rate'] - df['cum_good_rate']
+    # 计算KS值（取绝对值，确保无论分数方向如何都能正确计算）
+    df['ks'] = (df['cum_bad_rate'] - df['cum_good_rate']).abs()
 
     # 找到最大KS值
     ks_value = df['ks'].max()
@@ -136,10 +136,13 @@ def calculate_lift(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> 
     # 计算召回率
     df['cum_recall'] = df['cum_positive'] / total_positive
 
-    # 按分位数分箱
-    df['decile'] = pd.qcut(df['y_prob'], q=n_bins, labels=False, duplicates='drop') + 1
+    # 按分位数分箱：让 decile=1 对应最高分段（top 10%），decile=n_bins 对应最低分段
+    # pd.qcut(labels=False) 给最小值区间分配标签 0，因此翻转编号
+    n_unique_bins = min(n_bins, df['y_prob'].nunique())
+    raw_labels = pd.qcut(df['y_prob'], q=n_unique_bins, labels=False, duplicates='drop')
+    df['decile'] = n_unique_bins - raw_labels  # 翻转：最高分 → 1
 
-    # 计算分箱统计
+    # 计算分箱统计（decile 1 = 最高分段）
     lift_summary = []
     for decile in sorted(df['decile'].unique()):
         bin_data = df[df['decile'] == decile]
@@ -157,7 +160,7 @@ def calculate_lift(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> 
 
     df_lift_summary = pd.DataFrame(lift_summary)
 
-    # 计算累积Lift统计
+    # 累积统计从最高分段（decile 1）开始累积
     df_lift_summary['累积样本数'] = df_lift_summary['样本数'].cumsum()
     df_lift_summary['累积正样本数'] = df_lift_summary['正样本数'].cumsum()
     df_lift_summary['累积正样本率'] = df_lift_summary['累积正样本数'] / df_lift_summary['累积样本数']
@@ -357,9 +360,9 @@ def _get_stability_level(psi_value: float) -> int:
         return 4  # 需要重建模型
 
 
-def calculate_gain(y_true: np.ndarray, y_pred: np.ndarray, n_bins: int = 10) -> pd.Series:
+def calculate_gain(y_true: np.ndarray, y_pred: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
     """
-    计算gain
+    计算cumulative gain（累积增益）
 
     Parameters:
     -----------
@@ -372,16 +375,28 @@ def calculate_gain(y_true: np.ndarray, y_pred: np.ndarray, n_bins: int = 10) -> 
 
     Returns:
     --------
-    gain : pd.Series
-        gain值
+    gain_df : pd.DataFrame
+        包含每个分箱的累积增益
     """
     df = pd.DataFrame({'y_true': y_true, 'y_pred': y_pred})
     df = df.sort_values('y_pred', ascending=False).reset_index(drop=True)
     df['bin'] = pd.qcut(df.index, n_bins, labels=False)
-    grouped = df.groupby('bin')
     total_positives = df['y_true'].sum()
-    gain = grouped['y_true'].cumsum() / total_positives
-    return gain
+
+    if total_positives == 0:
+        return pd.DataFrame({'bin': range(n_bins), 'cumulative_gain': [0.0] * n_bins})
+
+    # 按分箱聚合后跨箱累积
+    bin_positives = df.groupby('bin')['y_true'].sum()
+    cumulative_gain = bin_positives.cumsum() / total_positives
+
+    gain_df = pd.DataFrame({
+        'bin': cumulative_gain.index + 1,
+        'cumulative_gain': cumulative_gain.values,
+        'cumulative_sample_pct': np.arange(1, n_bins + 1) / n_bins
+    })
+
+    return gain_df
 
 
 class ModelEvaluator:
@@ -423,6 +438,15 @@ class ModelEvaluator:
         evaluation_result : dict
             评估结果
         """
+        if not 0 <= threshold <= 1:
+            raise ValueError("threshold 必须在 [0, 1] 范围内")
+
+        if len(y_true) == 0:
+            raise ValueError("y_true 不能为空")
+
+        if len(y_true) != len(y_pred):
+            raise ValueError("y_true 与 y_pred 的长度必须一致")
+
         # 基础指标
         auc = calculate_auc(y_true, y_pred)
         ks, ks_detail, ks_index = calculate_ks(y_true, y_pred)
@@ -468,8 +492,105 @@ class ModelEvaluator:
             },
             'detailed_results': {
                 'ks_table': ks_detail,
-                'lift_table': lift_summary
-            }
+                'lift_table': lift_summary,
+                'lift_detail': lift_detail
+            },
+            'threshold': threshold,
+            'ks_index': int(ks_index)
+        }
+
+    def calculate_lift_analysis(self,
+                               y_true: np.ndarray,
+                               y_pred: np.ndarray,
+                               n_bins: int = 10) -> Dict[str, Any]:
+        """计算 Lift 分析结果。"""
+        lift_summary, lift_detail, baseline_rate = calculate_lift(
+            y_true, y_pred, n_bins=n_bins
+        )
+
+        top_decile_lift = lift_summary.iloc[0]['Lift'] if len(lift_summary) > 0 else None
+        cumulative_lift = (
+            lift_summary.iloc[-1]['累积Lift']
+            if len(lift_summary) > 0 and '累积Lift' in lift_summary.columns
+            else None
+        )
+
+        return {
+            'lift_table': lift_summary,
+            'detail': lift_detail,
+            'baseline_rate': baseline_rate,
+            'top_decile_lift': top_decile_lift,
+            'cumulative_lift': cumulative_lift,
+        }
+
+    def calculate_ks_table(self,
+                           y_true: np.ndarray,
+                           y_pred: np.ndarray,
+                           n_bins: int = 10) -> pd.DataFrame:
+        """基于分箱生成 KS 表格。"""
+        _, ks_detail, _ = calculate_ks(y_true, y_pred)
+        ks_detail = ks_detail.copy()
+
+        bins = min(n_bins, len(ks_detail))
+        ks_detail['decile'] = pd.qcut(
+            np.arange(len(ks_detail)),
+            q=bins,
+            labels=False,
+            duplicates='drop'
+        ) + 1
+
+        grouped = ks_detail.groupby('decile').agg({
+            'cum_good_rate': 'max',
+            'cum_bad_rate': 'max',
+            'ks': 'max',
+            'y_true': 'count'
+        }).rename(columns={'y_true': 'samples'})
+
+        grouped['decile'] = grouped.index
+
+        return grouped.reset_index(drop=True)
+
+    def get_evaluation_summary(self, evaluation_result: Dict[str, Any]) -> Dict[str, Any]:
+        """汇总评估结果，输出关键指标与建议。"""
+        if not evaluation_result:
+            raise ValueError("evaluation_result 不能为空")
+
+        basic = evaluation_result.get('basic_metrics', {})
+        lift_metrics = evaluation_result.get('lift_metrics', {})
+
+        auc = basic.get('auc', float('nan'))
+        ks_value = basic.get('ks', float('nan'))
+        precision = basic.get('precision', float('nan'))
+        recall = basic.get('recall', float('nan'))
+
+        performance_level = '良好'
+        recommendations: List[str] = []
+
+        if auc < 0.6 or ks_value < 0.2:
+            performance_level = '需改进'
+            recommendations.append('AUC 或 KS 偏低，建议重新评估特征与模型结构。')
+        elif auc < 0.7 or ks_value < 0.3:
+            performance_level = '一般'
+            recommendations.append('模型表现中等，可尝试超参数调优提升效果。')
+        else:
+            recommendations.append('模型表现稳定，请持续关注数据与特征漂移情况。')
+
+        if precision < 0.5:
+            recommendations.append('精确率偏低，建议调整阈值或引入成本敏感策略。')
+        if recall < 0.5:
+            recommendations.append('召回率偏低，可适当降低阈值或补充区分度更高的特征。')
+
+        return {
+            'model_name': evaluation_result.get('model_name', self.model_name),
+            'model_performance': performance_level,
+            'key_metrics': {
+                'auc': auc,
+                'ks': ks_value,
+                'precision': precision,
+                'recall': recall,
+                'top_decile_lift': lift_metrics.get('top_10_lift')
+            },
+            'recommendations': recommendations
         }
 
     def compare_models(self,

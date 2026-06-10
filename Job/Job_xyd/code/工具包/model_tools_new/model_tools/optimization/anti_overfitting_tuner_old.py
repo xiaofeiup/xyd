@@ -145,8 +145,8 @@ class AntiOverfittingTuner(HyperparameterTuner):
         else:
             sample_weight = None
 
-        # 设置交叉验证
-        cv_splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+        # 设置交叉验证（不固定random_state以获得真实的交叉验证效果）
+        cv_splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True)
 
         def objective(trial):
             try:

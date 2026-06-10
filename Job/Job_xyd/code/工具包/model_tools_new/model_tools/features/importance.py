@@ -287,6 +287,20 @@ class FeatureImportanceAnalyzer:
         self.importance_results_.update(results)
         return results
 
+    @staticmethod
+    def _get_score_column(importance_df: pd.DataFrame) -> str:
+        """
+        返回重要性 DataFrame 中表示分数的列名。
+
+        不同方法的分数列名不同：基于树/IV/相关性的方法使用 'importance'，
+        而排列重要性使用 'importance_mean'。这里统一兼容。
+        """
+        if 'importance' in importance_df.columns:
+            return 'importance'
+        if 'importance_mean' in importance_df.columns:
+            return 'importance_mean'
+        raise KeyError("重要性结果中找不到分数列（'importance' 或 'importance_mean'）")
+
     def get_consensus_ranking(self,
                             methods: Optional[List[str]] = None,
                             top_k: Optional[int] = None) -> pd.DataFrame:
@@ -323,15 +337,16 @@ class FeatureImportanceAnalyzer:
 
         for method in methods:
             importance_df = self.importance_results_[method]
-            for idx, row in importance_df.iterrows():
+            score_col = self._get_score_column(importance_df)
+            # 重要性已降序排列，名次按行顺序而非原始索引计算
+            for rank, (_, row) in enumerate(importance_df.iterrows(), start=1):
                 feature = row['feature']
-                rank = idx + 1  # 排名从1开始
 
                 if feature not in feature_rankings:
                     feature_rankings[feature] = {}
 
                 feature_rankings[feature][f'{method}_rank'] = rank
-                feature_rankings[feature][f'{method}_score'] = row['importance']
+                feature_rankings[feature][f'{method}_score'] = row[score_col]
 
         # 转换为DataFrame
         consensus_data = []
@@ -460,12 +475,13 @@ class FeatureImportanceAnalyzer:
         plot_data = []
         for method in methods:
             importance_df = self.importance_results_[method]
+            score_col = self._get_score_column(importance_df)
             method_data = importance_df[importance_df['feature'].isin(top_features)]
 
             for _, row in method_data.iterrows():
                 plot_data.append({
                     'feature': row['feature'],
-                    'importance': row['importance'],
+                    'importance': row[score_col],
                     'method': method
                 })
 
