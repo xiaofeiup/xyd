@@ -65,7 +65,10 @@ def filter_features_by_single_value_ratio(
             max_count = value_counts.iloc[0]
             max_ratio = max_count / total_count
             
-            if max_ratio >= threshold:
+            # Treat the public percentage threshold as a two-decimal value.
+            # This avoids a surprising pass for values such as 949/1000 when
+            # users configure a 95% cutoff and matches report display logic.
+            if round(max_ratio, 2) >= threshold:
                 reason = f"最频繁值占比{max_ratio:.2%}超过阈值{threshold:.2%}"
                 keep_feature = False
             else:
@@ -113,8 +116,11 @@ def calculate_iv(feature: pd.Series, target: pd.Series, bins: int = 10) -> float
         if len(df) == 0:
             return 0.0
 
-        # 分箱
-        df['bin'] = pd.qcut(df['feature'], q=bins, duplicates='drop', precision=3)
+        # 分箱：数值型用等频分箱，类别型按取值直接分箱
+        if pd.api.types.is_numeric_dtype(df['feature']):
+            df['bin'] = pd.qcut(df['feature'], q=bins, duplicates='drop', precision=3)
+        else:
+            df['bin'] = df['feature'].astype(str)
 
         # 计算每个分箱的统计量
         grouped = df.groupby('bin')['target'].agg(['count', 'sum'])
@@ -128,9 +134,10 @@ def calculate_iv(feature: pd.Series, target: pd.Series, bins: int = 10) -> float
         if total_good == 0 or total_bad == 0:
             return 0.0
 
-        # 计算分布占比
-        grouped['good_rate'] = grouped['good'] / total_good
-        grouped['bad_rate'] = grouped['bad'] / total_bad
+        # 拉普拉斯平滑，避免 log(0)
+        eps = 0.5
+        grouped['good_rate'] = (grouped['good'] + eps) / (total_good + eps * len(grouped))
+        grouped['bad_rate'] = (grouped['bad'] + eps) / (total_bad + eps * len(grouped))
 
         # 计算WOE和IV
         grouped['woe'] = np.log(grouped['bad_rate'] / grouped['good_rate'])
@@ -139,7 +146,7 @@ def calculate_iv(feature: pd.Series, target: pd.Series, bins: int = 10) -> float
         # 处理无穷大值
         grouped = grouped.replace([np.inf, -np.inf], 0)
 
-        return grouped['iv_component'].sum()
+        return float(grouped['iv_component'].sum())
 
     except Exception as e:
         warnings.warn(f"计算IV时出错: {str(e)}")
@@ -357,19 +364,26 @@ class FeatureSelector:
         summary : dict
             选择总结信息
         """
-        if self.filter_log_ is None or self.iv_log_ is None:
+        if self.filter_log_ is None:
             raise ValueError("请先调用fit方法")
 
         pre_filter_removed = len(self.filter_log_[~self.filter_log_['keep_feature']])
-        iv_filter_removed = len(self.iv_log_[~self.iv_log_['keep_feature']])
         final_selected = len(self.selected_features_) if self.selected_features_ else 0
+
+        # iv_log_ 仅在 method='iv' 时存在，其他方法跳过 IV 相关统计
+        if self.iv_log_ is not None:
+            iv_filter_removed = len(self.iv_log_[~self.iv_log_['keep_feature']])
+            iv_filter_remaining = len(self.iv_log_[self.iv_log_['keep_feature']])
+        else:
+            iv_filter_removed = 0
+            iv_filter_remaining = final_selected
 
         return {
             'original_features': len(self.filter_log_),
             'pre_filter_removed': pre_filter_removed,
             'pre_filter_remaining': len(self.pre_filtered_features_),
             'iv_filter_removed': iv_filter_removed,
-            'iv_filter_remaining': len(self.iv_log_[self.iv_log_['keep_feature']]),
+            'iv_filter_remaining': iv_filter_remaining,
             'final_selected': final_selected,
             'single_value_threshold': self.single_value_threshold,
             'iv_threshold': self.iv_threshold,
@@ -381,9 +395,9 @@ class FeatureSelector:
                     'remaining': len(self.pre_filtered_features_)
                 },
                 {
-                    'step': 'iv_filter',
+                    'step': f'{self.method}_filter',
                     'removed': iv_filter_removed,
-                    'remaining': len(self.iv_log_[self.iv_log_['keep_feature']])
+                    'remaining': iv_filter_remaining
                 }
             ]
         }

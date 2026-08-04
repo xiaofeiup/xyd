@@ -207,6 +207,31 @@ def calculate_psi(base_data: Union[np.ndarray, pd.Series],
             warnings.warn("输入数据包含空值或全为空")
             return np.nan, None
 
+        # Categorical PSI uses aligned value buckets instead of numeric
+        # interval arithmetic.  This keeps drift monitoring useful for
+        # object/category columns and avoids opaque TypeError fallbacks.
+        if not (pd.api.types.is_numeric_dtype(base_data) and pd.api.types.is_numeric_dtype(test_data)):
+            base_values = base_data.astype(str)
+            test_values = test_data.astype(str)
+            categories = sorted(set(base_values.unique()) | set(test_values.unique()))
+            base_counts = base_values.value_counts().reindex(categories, fill_value=0)
+            test_counts = test_values.value_counts().reindex(categories, fill_value=0)
+            psi_detail = pd.DataFrame({
+                'bin': categories,
+                'base_count': base_counts.to_numpy(),
+                'test_count': test_counts.to_numpy(),
+            })
+            psi_detail['base_dist'] = psi_detail['base_count'] / len(base_values)
+            psi_detail['test_dist'] = psi_detail['test_count'] / len(test_values)
+            eps_base = 1 / len(base_values)
+            eps_test = 1 / len(test_values)
+            base_dist = psi_detail['base_dist'].clip(lower=eps_base)
+            test_dist = psi_detail['test_dist'].clip(lower=eps_test)
+            psi_detail['psi_component'] = (test_dist - base_dist) * np.log(test_dist / base_dist)
+            if feature_name:
+                psi_detail['feature'] = feature_name
+            return float(psi_detail['psi_component'].sum()), psi_detail
+
         # 确定分箱边界
         if isinstance(bins, int):
             # 基于基准数据确定分位数分箱
@@ -507,6 +532,16 @@ class ModelEvaluator:
         lift_summary, lift_detail, baseline_rate = calculate_lift(
             y_true, y_pred, n_bins=n_bins
         )
+
+        # ``calculate_lift`` now exposes Chinese display headers.  Keep the
+        # historical machine-friendly ``decile`` field as a compatibility
+        # alias for downstream notebooks and callers.
+        if 'decile' not in lift_summary.columns and '分箱' in lift_summary.columns:
+            lift_summary = lift_summary.copy()
+            lift_summary['decile'] = lift_summary['分箱']
+        if 'lift' not in lift_summary.columns and 'Lift' in lift_summary.columns:
+            lift_summary = lift_summary.copy()
+            lift_summary['lift'] = lift_summary['Lift']
 
         top_decile_lift = lift_summary.iloc[0]['Lift'] if len(lift_summary) > 0 else None
         cumulative_lift = (

@@ -23,6 +23,7 @@ from .data_analysis import (
     DataAnalyzer,
     analyze_missing
 )
+from .streaming_feature_selection import StreamingFeatureSelector
 
 __all__ = [
     # 特征选择
@@ -41,5 +42,6 @@ __all__ = [
 
     # 数据分析
     'DataAnalyzer',
-    'analyze_missing'
+    'analyze_missing',
+    'StreamingFeatureSelector'
 ]

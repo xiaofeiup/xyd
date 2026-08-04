@@ -123,7 +123,10 @@ def run_experiment_batch(
     report_dir.mkdir(parents=True, exist_ok=True)
 
     feature_cols = list(feature_cols)
-    report_features = report_features if report_features is not None else feature_cols
+    report_features = list(report_features) if report_features is not None else feature_cols
+    # 交付报告除标签和预测分外，还会对 report_features 做变量有效性与稳定性分析。
+    # 保留这些字段，避免报告后续阶段因 eval_data 缺少特征列而降级为空表。
+    report_data_cols = list(dict.fromkeys([target_col, *report_features]))
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     rows: List[Dict[str, Any]] = []
@@ -147,7 +150,7 @@ def run_experiment_batch(
         train_pred = model.predict_proba(train_data[feature_cols])[:, 1]
         oot_pred = model.predict_proba(oot_data[feature_cols])[:, 1]
 
-        train_eval = train_data[[target_col]].copy()
+        train_eval = train_data[report_data_cols].copy()
         train_eval[score_col] = train_pred
         if sample_type_col in train_data.columns:
             train_eval[sample_type_col] = "train_" + train_data[sample_type_col].astype(str)
@@ -158,7 +161,7 @@ def run_experiment_batch(
         else:
             train_eval[date_col] = pd.Timestamp.today().normalize()
 
-        oot_eval = oot_data[[target_col]].copy()
+        oot_eval = oot_data[report_data_cols].copy()
         oot_eval[score_col] = oot_pred
         if sample_type_col in oot_data.columns:
             oot_eval[sample_type_col] = "oot_" + oot_data[sample_type_col].astype(str)

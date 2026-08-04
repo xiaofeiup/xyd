@@ -185,7 +185,7 @@ def evaluate_single_feature(
         keep = False
         reasons.append(f"缺失率{missing_ratio:.2%}>={missing_threshold:.2%}")
 
-    if max_ratio >= single_value_threshold:
+    if round(max_ratio, 2) >= single_value_threshold:
         keep = False
         reasons.append(f"单一值占比{max_ratio:.2%}>={single_value_threshold:.2%}")
 

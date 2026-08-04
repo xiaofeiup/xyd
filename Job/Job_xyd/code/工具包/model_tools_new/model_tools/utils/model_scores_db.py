@@ -17,9 +17,10 @@ from typing import Dict, List, Optional
 
 
 # 默认数据库文件路径
+# /Users/mayongzhi/Job/Job_xyd/数据/蜜蜂分/model_scores.db
 DEFAULT_DB_PATH = os.path.join(
     os.path.expanduser('~'),
-    'Job', 'Job_xyd', '数据', '总', 'model_scores.db'
+    'Job', 'Job_xyd', '数据', '蜜蜂分', 'model_scores.db'
 )
 
 # 默认表名

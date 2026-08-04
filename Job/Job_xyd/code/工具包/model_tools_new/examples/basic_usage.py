@@ -12,8 +12,11 @@ from sklearn.ensemble import RandomForestClassifier
 
 # 导入重构后的模型工具
 import sys
-import os
-sys.path.append('/Users/mayongzhi/Job/Job_xyd/code/工具包/model_tools_new')
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import model_tools as mt
 

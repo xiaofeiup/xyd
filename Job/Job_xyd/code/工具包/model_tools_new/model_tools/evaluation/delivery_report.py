@@ -16,7 +16,9 @@ class ModelDeliveryReport:
 
     def __init__(self, data: pd.DataFrame, target_col: str = 'target',
                  score_col: Union[str, List[str]] = 'score', date_col: str = 'date',
-                 sample_type_col: str = 'sample_type'):
+                 sample_type_col: str = 'sample_type',
+                 score_na_strategy: str = 'intersection',
+                 score_direction: Union[str, Dict[str, str]] = 'higher_is_bad'):
         """
         初始化报告生成器
 
@@ -25,10 +27,21 @@ class ModelDeliveryReport:
             target_col: 目标变量列名
             score_col: 模型分数列名，支持两种形式：
                        - str: 单个分数列（原有行为）
-                       - List[str]: 多个分数列。此时仅保留所有分数都不为空的样本，
-                         生成这些分数的整体对比报告（如KS_score1、AUC_score1等）
+                       - List[str]: 多个分数列，对比多个分数的表现
             date_col: 日期列名
             sample_type_col: 样本类型列名 (all, train, test, oot)
+            score_na_strategy: 多分数模式下的缺失处理策略：
+                       - 'intersection'（默认）: 仅保留所有分数都不为空的样本，
+                         生成整体对比报告（宽表，一行一个样本类型，指标列带分数后缀，
+                         如 KS_score1、AUC_score1）。
+                       - 'separate': 不取交集，按样本类型对每个分数各自用其非空样本
+                         计算表现（长表，每个 (样本类型, 分数) 一行，Good/Bad/Total
+                         均基于该分数非空样本，并额外给出缺失率列）。
+            score_direction: 分数与坏样本风险的方向，支持：
+                       - 'higher_is_bad'（默认）: 分数越高风险越高，例如违约概率。
+                       - 'higher_is_good': 分数越高风险越低，例如信用评分。
+                       - 'auto': 根据全量有效样本的原始AUC自动判断方向。
+                       - Dict[str, str]: 多分数模式下按分数列分别配置方向。
         """
         self.data = data.copy()
         self.target_col = target_col
@@ -42,24 +55,82 @@ class ModelDeliveryReport:
         # 主分数列（向后兼容：单分数方法默认使用第一个分数列）
         self.score_col = self.score_cols[0]
 
+        # 缺失处理策略校验
+        if score_na_strategy not in ('intersection', 'separate'):
+            raise ValueError(
+                f"score_na_strategy 仅支持 'intersection' 或 'separate'，收到: {score_na_strategy}"
+            )
+        self.score_na_strategy = score_na_strategy
+
         self.date_col = date_col
         self.sample_type_col = sample_type_col
 
-        # 多分数模式：仅保留所有分数都不为空的样本，生成整体报告
-        if self.is_multi_score:
-            missing_cols = [c for c in self.score_cols if c not in self.data.columns]
-            if missing_cols:
-                raise ValueError(f"以下分数列不存在于数据中: {missing_cols}")
+        # 校验分数列存在性
+        missing_cols = [c for c in self.score_cols if c not in self.data.columns]
+        if missing_cols:
+            raise ValueError(f"以下分数列不存在于数据中: {missing_cols}")
+
+        # intersection 策略：多分数模式下仅保留所有分数都不为空的样本
+        if self.is_multi_score and self.score_na_strategy == 'intersection':
             before = len(self.data)
             self.data = self.data.dropna(subset=self.score_cols).reset_index(drop=True)
             after = len(self.data)
             if after < before:
-                print(f"多分数模式：过滤掉 {before - after} 行存在缺失分数的样本，剩余 {after} 行")
+                print(f"多分数模式(intersection)：过滤掉 {before - after} 行存在缺失分数的样本，剩余 {after} 行")
+
+        # 规范化每个分数列的方向配置
+        valid_directions = {'higher_is_bad', 'higher_is_good', 'auto'}
+        if isinstance(score_direction, dict):
+            missing_direction_cols = [c for c in self.score_cols if c not in score_direction]
+            if missing_direction_cols:
+                raise ValueError(f"score_direction 缺少以下分数列的配置: {missing_direction_cols}")
+            direction_config = {c: score_direction[c] for c in self.score_cols}
+        else:
+            direction_config = {c: score_direction for c in self.score_cols}
+
+        self.score_directions = {}
+        for sc, direction in direction_config.items():
+            if direction not in valid_directions:
+                raise ValueError(
+                    "score_direction 仅支持 'higher_is_bad'、'higher_is_good'、'auto'，"
+                    f"分数列 {sc} 收到: {direction}"
+                )
+            if direction == 'auto':
+                direction, raw_auc = self._infer_score_direction(
+                    self.data[self.target_col], self.data[sc]
+                )
+                print(
+                    f"分数方向自动识别: {sc} -> {direction} "
+                    f"(原始AUC={raw_auc:.4f})"
+                )
+            self.score_directions[sc] = direction
+
+        # 主分数方向（向后兼容及便捷访问）
+        self.score_direction = self.score_directions[self.score_col]
 
         # 确保date列为datetime类型
         if date_col in self.data.columns:
             self.data[date_col] = pd.to_datetime(self.data[date_col])
             self.data['Month'] = self.data[date_col].dt.to_period('M')
+
+    @staticmethod
+    def _infer_score_direction(y_true: pd.Series, y_score: pd.Series) -> Tuple[str, float]:
+        """根据原始AUC推断分数方向；AUC小于0.5表示分数越高风险越低。"""
+        from sklearn.metrics import roc_auc_score
+
+        valid_data = pd.DataFrame({'y_true': y_true, 'y_score': y_score}).dropna()
+        if valid_data.empty or valid_data['y_true'].nunique() != 2:
+            raise ValueError("score_direction='auto' 需要目标列包含两个类别且存在有效分数")
+
+        raw_auc = roc_auc_score(valid_data['y_true'], valid_data['y_score'])
+        direction = 'higher_is_good' if raw_auc < 0.5 else 'higher_is_bad'
+        return direction, float(raw_auc)
+
+    def _get_risk_score(self, score: Union[pd.Series, np.ndarray], score_col: str):
+        """统一转换为风险分：转换后始终是数值越高，坏样本风险越高。"""
+        if self.score_directions[score_col] == 'higher_is_good':
+            return -score
+        return score
 
     def _calculate_ks(self, y_true: pd.Series, y_score: pd.Series) -> float:
         """计算KS值"""
@@ -93,9 +164,10 @@ class ModelDeliveryReport:
             expected_pct = expected_binned.value_counts(normalize=True, sort=False)
             actual_pct = actual_binned.value_counts(normalize=True, sort=False)
 
-            # 确保两个分布有相同的索引
-            expected_pct = expected_pct.reindex(actual_pct.index, fill_value=0.001)
-            actual_pct = actual_pct.fillna(0.001)
+            # 使用并集索引，避免丢失任一分布独有的分箱
+            all_bins = expected_pct.index.union(actual_pct.index)
+            expected_pct = expected_pct.reindex(all_bins, fill_value=0.0001)
+            actual_pct = actual_pct.reindex(all_bins, fill_value=0.0001)
 
             # 计算PSI
             psi = sum((actual_pct - expected_pct) * np.log(actual_pct / expected_pct))
@@ -451,26 +523,39 @@ class ModelDeliveryReport:
 
         return pd.DataFrame(monthly_stats)
 
-    def generate_model_performance(self, base_type: str = 'all') -> pd.DataFrame:
+    def generate_model_performance(self, base_type: str = 'all', n_bins: int = 10) -> pd.DataFrame:
         """
         生成模型效果统计表
 
-        单分数模式下，输出列为 KS / AUC / TOP10_lift / PSI；
+        单分数模式下，输出列为 KS / AUC / TOP{100/n_bins}_lift / PSI；
         多分数模式下，每个分数对应一组指标列，列名带分数后缀，
-        如 KS_score1 / AUC_score1 / TOP10_lift_score1 / PSI_score1。
+        如 n_bins=20 时输出 KS_score1 / AUC_score1 / TOP5_lift_score1 / PSI_score1。
 
         Args:
             base_type: PSI计算的基准样本类型
+            n_bins: Lift分箱数量，例如20分箱对应TOP5_lift
 
         Returns:
             模型效果汇总表
         """
+        if not isinstance(n_bins, int) or isinstance(n_bins, bool) or n_bins <= 0:
+            raise ValueError(f"n_bins 必须为正整数，收到: {n_bins}")
+
+        top_pct_label = f"{100 / n_bins:g}"
+        top_lift_column = f"TOP{top_pct_label}_lift"
         performance_stats = []
+
+        # separate 策略：每个分数各自用其非空样本计算表现，并额外给出缺失率列
+        is_separate = self.is_multi_score and self.score_na_strategy == 'separate'
 
         # 获取各分数的基准数据用于PSI计算
         if base_type in self.data[self.sample_type_col].values:
             base_data = self.data[self.data[self.sample_type_col] == base_type]
-            base_scores_map = {sc: base_data[sc] for sc in self.score_cols}
+            # separate 模式下基准分布也仅基于该分数非空样本
+            if is_separate:
+                base_scores_map = {sc: base_data[sc].dropna() for sc in self.score_cols}
+            else:
+                base_scores_map = {sc: base_data[sc] for sc in self.score_cols}
         else:
             base_scores_map = {sc: None for sc in self.score_cols}
 
@@ -504,22 +589,42 @@ class ModelDeliveryReport:
                 # 仅多分数模式添加后缀，单分数保持原列名
                 suffix = f"_{sc}" if self.is_multi_score else ""
 
-                ks = self._calculate_ks(sample_data[self.target_col], sample_data[sc])
-                auc = self._calculate_auc(sample_data[self.target_col], sample_data[sc])
+                if is_separate:
+                    # separate 模式：仅用该分数非空样本计算指标，并记录缺失率
+                    score_mask = sample_data[sc].notna()
+                    score_data = sample_data[score_mask]
+                    miss_rate = 1 - len(score_data) / total if total > 0 else 0
+                    row[f'缺失率{suffix}'] = f"{miss_rate:.4f}"
+                else:
+                    score_data = sample_data
+
+                # 该分数在当前样本类型下无有效样本（如全部缺失），指标置 N/A，避免空数组分箱报错
+                if len(score_data) == 0:
+                    row[f'KS{suffix}'] = "N/A"
+                    row[f'AUC{suffix}'] = "N/A"
+                    row[f'{top_lift_column}{suffix}'] = "N/A"
+                    row[f'PSI{suffix}'] = "N/A"
+                    continue
+
+                # 统一转换为“数值越高风险越高”，避免高分代表好时指标方向倒置
+                risk_score = self._get_risk_score(score_data[sc], sc)
+                ks = self._calculate_ks(score_data[self.target_col], risk_score)
+                auc = self._calculate_auc(score_data[self.target_col], risk_score)
 
                 base_scores = base_scores_map.get(sc)
                 if base_scores is not None and sample_type != base_type:
-                    psi = self._calculate_psi(base_scores, sample_data[sc])
+                    psi = self._calculate_psi(base_scores, score_data[sc])
                 else:
                     psi = 0.0
 
                 df_lift, baseline_rate = self._calculate_lift_for_plot(
-                    sample_data[self.target_col], sample_data[sc]
+                    score_data[self.target_col], risk_score, n_bins=n_bins,
+                    display_score=score_data[sc]
                 )
 
                 row[f'KS{suffix}'] = f"{ks:.4f}" if not pd.isna(ks) else "N/A"
                 row[f'AUC{suffix}'] = f"{auc:.4f}" if not pd.isna(auc) else "N/A"
-                row[f'TOP10_lift{suffix}'] = f"{df_lift.iloc[-1]['Lift']:.4f}" if len(df_lift) > 0 else "N/A"
+                row[f'{top_lift_column}{suffix}'] = f"{df_lift.iloc[0]['Lift']:.4f}" if len(df_lift) > 0 else "N/A"
                 row[f'PSI{suffix}'] = f"{psi:.4f}" if not pd.isna(psi) else "N/A"
 
             performance_stats.append(row)
@@ -541,6 +646,10 @@ class ModelDeliveryReport:
         from sklearn.metrics import roc_curve, auc, roc_auc_score
         import tempfile
         import os
+
+        if not isinstance(n_bins, int) or isinstance(n_bins, bool) or n_bins <= 0:
+            raise ValueError(f"n_bins 必须为正整数，收到: {n_bins}")
+        top_pct_label = f"{100 / n_bins:g}"
 
         # 设置中文字体支持
         plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial Unicode MS", "STHeiti"]
@@ -566,15 +675,18 @@ class ModelDeliveryReport:
                     continue
 
                 y_true = sample_data[self.target_col].values
-                y_prob = sample_data[sc].values
+                y_score = sample_data[sc].values
+                risk_score = self._get_risk_score(y_score, sc)
 
-                # 计算统计量
-                ks_value, df_ks, ks_index = self._calculate_ks_for_plot(y_true, y_prob)
-                df_lift, baseline_rate = self._calculate_lift_for_plot(y_true, y_prob, n_bins)
+                # KS、Lift和ROC统一使用“越高越坏”的风险方向
+                ks_value, df_ks, ks_index = self._calculate_ks_for_plot(y_true, risk_score)
+                df_lift, baseline_rate = self._calculate_lift_for_plot(
+                    y_true, risk_score, n_bins, display_score=y_score
+                )
 
                 # 计算AUC
                 try:
-                    fpr, tpr, _ = roc_curve(y_true, y_prob)
+                    fpr, tpr, _ = roc_curve(y_true, risk_score)
                     roc_auc = auc(fpr, tpr)
                 except:
                     fpr, tpr = [0, 1], [0, 1]
@@ -596,11 +708,11 @@ class ModelDeliveryReport:
                 axes[0, 0].legend()
                 axes[0, 0].grid(True, alpha=0.3)
 
-                # 2. Lift曲线
-                axes[0, 1].plot(df_lift['累积召回率'], df_lift['累积Lift'],
+                # 2. Lift曲线（从最高风险样本开始累计）
+                axes[0, 1].plot(df_lift['累积样本占比'], df_lift['累积Lift'],
                                 'b-o', linewidth=2, markersize=6)
                 axes[0, 1].axhline(y=1, color='red', linestyle='--', alpha=0.7)
-                axes[0, 1].set_xlabel('累积召回率')
+                axes[0, 1].set_xlabel('累积样本占比')
                 axes[0, 1].set_ylabel('累积Lift')
                 axes[0, 1].set_title('累积Lift曲线')
                 axes[0, 1].grid(True, alpha=0.3)
@@ -623,24 +735,25 @@ class ModelDeliveryReport:
                 axes[1, 0].set_title('各分箱Lift值')
                 axes[1, 0].grid(True, alpha=0.3)
 
-                # 5. 概率分布
-                axes[1, 1].hist(y_prob[y_true == 0], bins=30, alpha=0.6, label='负样本',
+                # 5. 原始分数分布（保留业务分数刻度）
+                axes[1, 1].hist(y_score[y_true == 0], bins=30, alpha=0.6, label='负样本',
                                 color='blue', density=True)
-                axes[1, 1].hist(y_prob[y_true == 1], bins=30, alpha=0.6, label='正样本',
+                axes[1, 1].hist(y_score[y_true == 1], bins=30, alpha=0.6, label='正样本',
                                 color='red', density=True)
-                axes[1, 1].set_xlabel('预测概率')
+                axes[1, 1].set_xlabel('模型分数')
                 axes[1, 1].set_ylabel('密度')
-                axes[1, 1].set_title('样本概率分布')
+                axes[1, 1].set_title('样本分数分布')
                 axes[1, 1].legend()
                 axes[1, 1].grid(True, alpha=0.3)
 
-                # 6. 增益图
-                random_line = np.linspace(0, 1, len(df_lift))
-                axes[1, 2].plot(df_lift['累积召回率'], df_lift['累积召回率'],
+                # 6. 增益图（横轴为累计样本占比，纵轴为累计坏样本召回率）
+                sample_pct = df_lift['累积样本占比']
+                recall = df_lift['累积召回率']
+                axes[1, 2].plot(sample_pct, recall,
                                 'b-o', linewidth=2, label='模型增益')
-                axes[1, 2].plot(random_line, random_line, 'r--', alpha=0.7, label='随机模型')
-                axes[1, 2].fill_between(df_lift['累积召回率'], random_line[:len(df_lift)],
-                                        df_lift['累积召回率'], alpha=0.3, color='green')
+                axes[1, 2].plot([0, 1], [0, 1], 'r--', alpha=0.7, label='随机模型')
+                axes[1, 2].fill_between(sample_pct, sample_pct,
+                                        recall, alpha=0.3, color='green')
                 axes[1, 2].set_xlabel('样本比例')
                 axes[1, 2].set_ylabel('捕获正样本比例')
                 axes[1, 2].set_title('增益图')
@@ -668,7 +781,7 @@ class ModelDeliveryReport:
                     '正样本率': f"{baseline_rate:.4f}",
                     'KS': f"{ks_value:.4f}" if not pd.isna(ks_value) else "N/A",
                     'AUC': f"{roc_auc:.4f}" if not pd.isna(roc_auc) else "N/A",
-                    'Top10%_Lift': f"{df_lift.iloc[-1]['Lift']:.4f}" if len(df_lift) > 0 else "N/A"
+                    f'Top{top_pct_label}%_Lift': f"{df_lift.iloc[0]['Lift']:.4f}" if len(df_lift) > 0 else "N/A"
                 })
                 result['metrics_summary'].append(metrics_row)
 
@@ -709,41 +822,77 @@ class ModelDeliveryReport:
         return ks_value, df, ks_index
 
     def _calculate_lift_for_plot(self, y_true: np.ndarray, y_prob: np.ndarray,
-                                  n_bins: int = 10) -> Tuple[pd.DataFrame, float]:
-        """计算Lift统计表用于绘图"""
-        df = pd.DataFrame({'y_true': y_true, 'y_prob': y_prob})
-        df = df.sort_values('y_prob', ascending=False).reset_index(drop=True)
+                                  n_bins: int = 10,
+                                  display_score: Optional[np.ndarray] = None) -> Tuple[pd.DataFrame, float]:
+        """
+        计算Lift统计表用于绘图。
+
+        y_prob 必须是已统一方向的风险分（数值越高风险越高）；display_score
+        用于在分箱范围中保留原始业务分数刻度。
+        """
+        if display_score is None:
+            display_score = y_prob
+
+        df = pd.DataFrame({
+            'y_true': y_true,
+            'y_prob': y_prob,
+            'display_score': display_score,
+        })
+        df = df.dropna(subset=['y_prob', 'display_score'])
+        # 预测分数可能包含无穷值；这些值既不能参与分箱，也不能用于展示范围。
+        df = df[
+            np.isfinite(df['y_prob']) & np.isfinite(df['display_score'])
+        ].copy()
+
+        # 无有效样本时直接返回空表，避免空数组分箱报错
+        if len(df) == 0:
+            return pd.DataFrame(), 0.0
 
         total_samples = len(df)
         total_positive = df['y_true'].sum()
         baseline_rate = total_positive / total_samples if total_samples > 0 else 0
 
-        # 分箱
+        # 按风险分分箱：标签越大表示风险越高
         try:
-            df['decile'] = pd.qcut(df['y_prob'], q=n_bins, labels=False, duplicates='drop') + 1
-        except:
-            df['decile'] = pd.cut(df['y_prob'], bins=n_bins, labels=False, duplicates='drop') + 1
+            df['risk_bin'] = pd.qcut(
+                df['y_prob'], q=n_bins, labels=False, duplicates='drop'
+            ) + 1
+        except Exception:
+            df['risk_bin'] = pd.cut(
+                df['y_prob'], bins=n_bins, labels=False, duplicates='drop'
+            ) + 1
 
-        # 分箱统计
+        # 从最高风险箱开始排列和累计，保证Lift/增益曲线方向正确。
+        # 常数预测分数在 qcut(..., duplicates='drop') 后会全部成为 NaN；
+        # 此时将全部有效样本归入一个箱，仍可输出有效的整体 Lift。
+        risk_bins = sorted(df['risk_bin'].dropna().unique(), reverse=True)
+        if not risk_bins:
+            df['risk_bin'] = 1
+            risk_bins = [1]
+
         lift_summary = []
-        for decile in sorted(df['decile'].unique()):
-            bin_data = df[df['decile'] == decile]
+        for display_bin, risk_bin in enumerate(risk_bins, start=1):
+            bin_data = df[df['risk_bin'] == risk_bin]
 
             bin_stats = {
-                '分箱': decile,
+                '分箱': display_bin,
                 '样本数': len(bin_data),
                 '正样本数': bin_data['y_true'].sum(),
                 '负样本数': len(bin_data) - bin_data['y_true'].sum(),
                 '正样本率': bin_data['y_true'].mean(),
                 'Lift': bin_data['y_true'].mean() / baseline_rate if baseline_rate > 0 else 0,
-                '概率范围': f"{bin_data['y_prob'].min():.3f}-{bin_data['y_prob'].max():.3f}"
+                '概率范围': (
+                    f"{bin_data['display_score'].min():.3f}-"
+                    f"{bin_data['display_score'].max():.3f}"
+                ),
             }
             lift_summary.append(bin_stats)
 
         df_lift = pd.DataFrame(lift_summary)
 
-        # 计算累积统计
+        # 累计统计均从最高风险样本开始
         df_lift['累积样本数'] = df_lift['样本数'].cumsum()
+        df_lift['累积样本占比'] = df_lift['累积样本数'] / total_samples
         df_lift['累积正样本数'] = df_lift['正样本数'].cumsum()
         df_lift['累积正样本率'] = df_lift['累积正样本数'] / df_lift['累积样本数']
         df_lift['累积Lift'] = df_lift['累积正样本率'] / baseline_rate if baseline_rate > 0 else 0
@@ -801,8 +950,9 @@ class ModelDeliveryReport:
                 bin_stats['total_pct'] = bin_stats['total_users'] / len(sample_data)
                 bin_stats['bad_pct'] = bin_stats['bad_users'] / bin_stats['bad_users'].sum()
 
-                # 计算累计指标
-                bin_stats = bin_stats.sort_index(ascending=False)  # 按分数降序
+                # 从高风险箱开始累计：概率分降序，信用评分升序
+                high_score_is_good = self.score_directions[sc] == 'higher_is_good'
+                bin_stats = bin_stats.sort_index(ascending=high_score_is_good)
                 bin_stats['cum_bad_rate'] = (bin_stats['bad_users'].cumsum() /
                                            bin_stats['total_users'].cumsum())
                 bin_stats['cum_bad_pct'] = bin_stats['bad_users'].cumsum() / bin_stats['bad_users'].sum()
@@ -1452,7 +1602,8 @@ class ModelDeliveryReport:
                            bin_method: str = 'quantile',
                            model: Any = None,
                            importance_type: str = 'gain',
-                           experiment_meta: Optional[Dict[str, Any]] = None) -> Dict[str, pd.DataFrame]:
+                           experiment_meta: Optional[Dict[str, Any]] = None,
+                           n_bins: int = 10) -> Dict[str, pd.DataFrame]:
         """
         生成完整的模型交付报告
 
@@ -1464,10 +1615,14 @@ class ModelDeliveryReport:
             model: 可选，用于计算特征重要性的模型（支持LightGBM/XGBoost/sklearn模型）
             importance_type: 特征重要性类型，'gain'/'split'/'weight'（仅对树模型有效）
             experiment_meta: 实验元信息（可选），用于记录实验ID、参数、路径等
+            n_bins: 模型分及Lift分箱数量，例如20分箱对应TOP5_lift
 
         Returns:
             包含所有报告表格的字典
         """
+        if not isinstance(n_bins, int) or isinstance(n_bins, bool) or n_bins <= 0:
+            raise ValueError(f"n_bins 必须为正整数，收到: {n_bins}")
+
         report = {}
 
         # 0. 实验元信息（用于参数-评估追踪）
@@ -1489,7 +1644,7 @@ class ModelDeliveryReport:
 
         try:
             # 2. 模型效果
-            report['模型效果'] = self.generate_model_performance()
+            report['模型效果'] = self.generate_model_performance(n_bins=n_bins)
             print("✓ 模型效果分析完成")
         except Exception as e:
             print(f"✗ 模型效果分析失败: {e}")
@@ -1497,7 +1652,9 @@ class ModelDeliveryReport:
 
         try:
             # 3. 模型效果分箱
-            report['模型效果分箱'] = self.generate_score_bins_analysis(bin_method=bin_method)
+            report['模型效果分箱'] = self.generate_score_bins_analysis(
+                bins=n_bins, bin_method=bin_method
+            )
             print("✓ 模型效果分箱分析完成")
         except Exception as e:
             print(f"✗ 模型效果分箱分析失败: {e}")
@@ -1505,7 +1662,7 @@ class ModelDeliveryReport:
 
         try:
             # 3.5 模型评估指标报告（metric_report_plot的图表版本）
-            metric_plot_result = self.generate_metric_report_plot(n_bins=10)
+            metric_plot_result = self.generate_metric_report_plot(n_bins=n_bins)
             # report['评估指标汇总'] = pd.DataFrame(metric_plot_result['metrics_summary'])
             if metric_plot_result['lift_details']:
                 report['Lift分箱详情'] = pd.concat(metric_plot_result['lift_details'], ignore_index=True)
@@ -1567,7 +1724,9 @@ class ModelDeliveryReport:
 
         try:
             # 7. 模型分表现
-            report['模型分表现'] = self.generate_model_score_distribution(bin_method=bin_method)
+            report['模型分表现'] = self.generate_model_score_distribution(
+                bins=n_bins, bin_method=bin_method
+            )
             print("✓ 模型分表现分析完成")
         except Exception as e:
             print(f"✗ 模型分表现分析失败: {e}")

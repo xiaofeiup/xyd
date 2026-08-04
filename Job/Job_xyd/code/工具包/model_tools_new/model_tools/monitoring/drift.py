@@ -37,6 +37,10 @@ class FeatureDriftDetector:
             每个分箱最小样本数
         """
         self.feature_names = feature_names
+        if psi_threshold < 0:
+            raise ValueError("psi_threshold 不能为负数")
+        if bins <= 0 or min_sample <= 0:
+            raise ValueError("bins 和 min_sample 必须为正数")
         self.psi_threshold = psi_threshold
         self.bins = bins
         self.min_sample = min_sample
@@ -144,12 +148,14 @@ class FeatureDriftDetector:
         stats = {}
         for feature in baseline.columns:
             series = baseline[feature].dropna()
+            numeric = pd.api.types.is_numeric_dtype(series)
             stats[feature] = {
-                'mean': float(series.mean()) if not series.empty else np.nan,
-                'std': float(series.std()) if not series.empty else np.nan,
-                'min': float(series.min()) if not series.empty else np.nan,
-                'max': float(series.max()) if not series.empty else np.nan,
-                'count': int(series.size)
+                'mean': float(series.mean()) if numeric and not series.empty else np.nan,
+                'std': float(series.std()) if numeric and not series.empty else np.nan,
+                'min': float(series.min()) if numeric and not series.empty else np.nan,
+                'max': float(series.max()) if numeric and not series.empty else np.nan,
+                'count': int(series.size),
+                'unique_count': int(series.nunique()) if not series.empty else 0,
             }
         return stats
 

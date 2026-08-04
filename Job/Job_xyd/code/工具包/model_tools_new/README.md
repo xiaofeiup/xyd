@@ -413,3 +413,23 @@ flake8 model_tools tests
 ---
 
 **Model Tools 2.0** - 让机器学习模型开发更简单、更可靠！
+# 自动化建模流水线
+
+现在可以通过配置驱动的公共 API 完成数据校验、数值特征分析、特征筛选、（可选）Optuna 调参、Train/OOS 评估，以及 HTML + Excel 报告生成。
+
+```bash
+PYTHONPATH=. python -m model_tools.cli \
+  --auto-modeling-config model_tools/auto/pipeline_config.example.yaml
+```
+
+Python 调用：
+
+```python
+from model_tools.auto import AutoModelingConfig, AutoModelingPipeline
+
+config = AutoModelingConfig.from_dict({...})
+result = AutoModelingPipeline(config).run()
+print(result.html_report_path)
+```
+
+每次运行会生成独立目录，包含 `model_report.html`、`model_delivery_report.xlsx`、`model.joblib`、`preprocessor.joblib`、`predictions.csv`、`metrics.json`、特征筛选日志和配置快照。输入支持单表 CSV/Parquet，也支持特征表 + 标签表按主键合并；关键字段和 Train/OOS 分区采用严格校验。

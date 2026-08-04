@@ -215,6 +215,10 @@ class ModelStabilityMonitor:
 
         return pd.DataFrame(trend_data)
 
+    def get_monitoring_history(self) -> List[Dict]:
+        """Return a shallow copy of recorded monitoring results."""
+        return list(self.monitoring_history)
+
     def get_summary_report(self, days: int = 7) -> Dict:
         """
         获取监控汇总报告

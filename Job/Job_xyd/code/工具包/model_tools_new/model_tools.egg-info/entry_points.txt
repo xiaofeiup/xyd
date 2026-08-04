@@ -1,0 +1,2 @@
+[console_scripts]
+model-tools = model_tools.cli:main

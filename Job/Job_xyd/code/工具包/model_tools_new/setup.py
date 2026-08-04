@@ -123,15 +123,6 @@ setup(
         ],
     },
 
-    package_data={
-        'model_tools': [
-            'config/*.yaml',
-            'config/*.json',
-            'templates/*.html',
-            'templates/*.css',
-        ],
-    },
-
     project_urls={
         'Bug Reports': 'https://github.com/your-org/model-tools/issues',
         'Source': 'https://github.com/your-org/model-tools',

@@ -80,6 +80,9 @@ from .utils.decorators import (
     ml_function,
 )
 
+# 自动化建模公共 API（依赖按需加载）
+from .auto import AutoModelingConfig, AutoModelingPipeline, PipelineRunResult, run_auto_modeling
+
 __all__ = [
     # 元信息
     '__version__',
@@ -122,6 +125,10 @@ __all__ = [
     'FeatureValidator',
     'validate_dataset',
     'compare_datasets',
+    'AutoModelingConfig',
+    'AutoModelingPipeline',
+    'PipelineRunResult',
+    'run_auto_modeling',
 
     # 工具函数 / 装饰器
     'check_data_quality',

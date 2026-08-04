@@ -88,6 +88,7 @@ class AlertManager:
         """
         alert = {
             'type': alert_type,
+            'alert_type': alert_type,
             'message': message,
             'severity': severity,
             'timestamp': timestamp or datetime.now().isoformat(),
@@ -297,7 +298,7 @@ class AlertManager:
             'highest_severity': max(severity_counts.keys(), key=lambda x: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].index(x)) if severity_counts else None
         }
 
-    def clear_alert_history(self, keep_days: int = 30):
+    def clear_alert_history(self, keep_days: int = 0):
         """
         清理报警历史
 
@@ -308,6 +309,9 @@ class AlertManager:
         """
         from datetime import timedelta
 
+        if keep_days <= 0:
+            self.alert_history = []
+            return
         cutoff_time = datetime.now() - timedelta(days=keep_days)
         cutoff_str = cutoff_time.isoformat()
 
@@ -471,6 +475,7 @@ class AlertEngine:
 
                 # 发送报警
                 self.alert_manager.send_alert(**alert_copy)
+                alert['alert_type'] = alert.get('type', alert_copy.get('alert_type'))
                 triggered_alerts.append(alert)
 
         return triggered_alerts

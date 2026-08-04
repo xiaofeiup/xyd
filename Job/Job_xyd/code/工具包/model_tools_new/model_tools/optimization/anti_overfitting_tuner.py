@@ -135,6 +135,14 @@ class AntiOverfittingTuner(HyperparameterTuner):
         if objective_function is None:
             objective_function = self.auc_objective
 
+        # 重置性能历史，避免多次调用时历史记录互相污染
+        self.performance_history_ = []
+
+        # 自动判定任务类型（分类/回归），确保参数空间与数据匹配
+        is_classification = self._is_classification_task(y)
+        self.task_type = 'classification' if is_classification else 'regression'
+        self.n_classes_ = int(len(np.unique(y))) if is_classification else None
+
         # 提取权重列
         if weight_col is not None:
             if isinstance(X, pd.DataFrame) and weight_col in X.columns:
@@ -146,7 +154,11 @@ class AntiOverfittingTuner(HyperparameterTuner):
             sample_weight = None
 
         # 设置交叉验证
-        cv_splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+        if is_classification:
+            cv_splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+        else:
+            from sklearn.model_selection import KFold
+            cv_splitter = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
 
         def objective(trial):
             try:
@@ -264,6 +276,19 @@ class AntiOverfittingTuner(HyperparameterTuner):
             show_progress_bar=show_progress_bar
         )
 
+        # 校验是否存在有效（已完成且分数有限）的 trial，避免全部失败时崩溃
+        completed = [
+            t for t in self.study.trials
+            if t.state == optuna.trial.TrialState.COMPLETE
+            and t.value is not None
+            and np.isfinite(t.value)
+        ]
+        if not completed:
+            raise RuntimeError(
+                "所有 trial 均失败或未产生有效分数，无法得到最佳参数。"
+                "请检查模型参数空间、评分函数与数据是否匹配（可查看 warnings 输出）。"
+            )
+
         # 保存最佳结果
         self.best_params_ = self.study.best_params
         self.best_score_ = self.study.best_value
@@ -310,7 +335,7 @@ class AntiOverfittingTuner(HyperparameterTuner):
             'n_trials': len(self.study.trials),
             'performance_history': self.performance_history_,
             'results_summary': {
-                'total_trials': len(results_df) if len(results_df) > 0 else 0,
+                'total_trials': len(self.study.trials),
                 'valid_trials': len(valid_trials) if len(valid_trials) > 0 else 0,
                 'avg_auc_gap': results_df['auc_gap'].mean() if len(results_df) > 0 and 'auc_gap' in results_df.columns else 0,
                 'avg_ks_gap': results_df['ks_gap'].mean() if len(results_df) > 0 and 'ks_gap' in results_df.columns else 0,
