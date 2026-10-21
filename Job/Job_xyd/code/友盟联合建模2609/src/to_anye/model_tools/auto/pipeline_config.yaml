@@ -1,0 +1,65 @@
+# ============================================================
+# 自动化建模流水线配置文件
+#
+# 使用方式:
+#   /opt/anaconda3/envs/mifeng_py38/bin/python3 auto_modeling_pipeline.py --config pipeline_config.yaml
+#
+# 也可以覆盖单个参数:
+#   /opt/anaconda3/envs/mifeng_py38/bin/python3 auto_modeling_pipeline.py --config pipeline_config.yaml --n_trials 50
+# ============================================================
+
+# ---------- 数据配置 ----------
+data:
+  feature_path: "/Users/mayongzhi/Job/Job_xyd/数据/WorkBuddy_data/data_upload/ym.csv"
+  label_path: "/Users/mayongzhi/Job/Job_xyd/数据/WorkBuddy_data/data_upload/df.csv"
+  key_col: "test_id"              # 主键列名 (两表关联用)
+  target_col: "flag"              # 目标变量列名 (0/1)
+  sample_type_col: "mid_sample_type"  # 样本类型列名
+  date_col: "apply_date"          # 日期列名 (用于时间维度分析)
+  train_label: "1-train"          # 训练集标记值
+  oos_label: "3-oos"             # 时间外样本标记值
+  exclude_cols:                   # 不参与建模的列
+    - "Unnamed: 0"
+    - "mobile"
+    - "apply_date"
+    - "test_id"
+    - "id_number"
+    - "flag"
+    - "mid_sample_type"
+    - "partner_code"
+    - "蜜蜂分_中利率版7_2_proba"
+    - "蜜蜂分_中利率版6_2_proba"
+    - "蜜蜂分_中利率版2_2_proba"
+
+# ---------- 特征筛选配置 ----------
+feature_selection:
+  missing_threshold: 0.5          # 缺失率超过此值的特征剔除
+  single_value_threshold: 0.95    # 单一值占比超过此值的特征剔除
+  iv_threshold: 0.02             # IV 值低于此值的特征剔除
+  # 如果筛选后特征数为 0, 会自动降低阈值重试
+  iv_threshold_fallback: 0.01    # 降级 IV 阈值
+  single_value_fallback: 0.99    # 降级单一值阈值
+
+# ---------- 自动调参配置 ----------
+tuning:
+  n_trials: 20                    # Optuna 试验次数
+  cv_folds: 3                     # 交叉验证折数
+  max_auc_gap: 0.05              # AUC 差距阈值 (超过则判定过拟合)
+  max_ks_gap: 0.03               # KS 差距阈值
+  overfitting_penalty_weight: 2.0 # 过拟合惩罚权重
+  # 选参策略: composite_score = val_auc_weight * val_auc_norm + (1-val_auc_weight) * (1 - gap_norm)
+  val_auc_weight: 0.5            # val_auc 在综合评分中的权重 (0-1)
+  n_jobs: 1                       # LightGBM 并行度 (sandbox 内存限制建议 1)
+
+# ---------- 模型评估配置 ----------
+evaluation:
+  n_bins: 10                      # 模型分分箱数
+  top_k_features: 20             # 变量有效性分析取 TOP K 特征
+  importance_type: "gain"        # 特征重要性类型: gain / split
+
+# ---------- 输出配置 ----------
+output:
+  output_dir: "/Users/mayongzhi/Job/Job_xyd/数据/WorkBuddy_data/data_upload/output"
+  toolkit_path: "~/Job/Job_xyd/code/工具包/model_tools_new"
+  # 如果已有调参结果, 设置 reuse_params_path 可跳过调参步骤
+  reuse_params_path: null         # 例: "output/best_params.json"

@@ -1,0 +1,13 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+# macOS / 同步盘垃圾文件
+.DS_Store
+.WeDrive
+
+# WorkBuddy 本地工作数据（记忆日志等，不入库）
+.workbuddy/
+
+# Linux 离线依赖包（453MB 部署产物，超出 GitHub 单文件限制，不入库）
+offline_bundle_linux_py38_x86_64/

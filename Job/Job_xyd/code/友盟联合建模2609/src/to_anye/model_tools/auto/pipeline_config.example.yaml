@@ -1,0 +1,34 @@
+# 单表输入示例；双表输入时删除 path，改用 feature_paths + label_path
+data:
+  path: "/path/to/model_data.csv"
+  key_col: "id"
+  target_col: "target"
+  sample_type_col: "sample_type"
+  train_label: "train"
+  oos_label: "oos"
+  date_col: "apply_date"
+  exclude_cols: []
+
+model:
+  # lightgbm / xgboost / logistic_regression
+  type: "logistic_regression"
+
+feature_selection:
+  # in_memory；多份宽 CSV 可使用 streaming，并配置 feature_paths + label_path
+  mode: "in_memory"
+  missing_threshold: 0.95
+  single_value_threshold: 0.95
+  iv_threshold: 0.02
+  iv_bins: 10
+
+tuning:
+  enabled: true
+  n_trials: 20
+  cv_folds: 3
+  max_auc_gap: 0.05
+  max_ks_gap: 0.03
+  n_jobs: 1
+
+output:
+  output_dir: "./model_runs"
+  run_name: null
