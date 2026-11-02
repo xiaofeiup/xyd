@@ -158,7 +158,8 @@ class AntiOverfittingTuner(HyperparameterTuner):
         cv_folds: int = 5,
         n_jobs: int = 1,
         show_progress_bar: bool = True,
-        weight_col: Optional[str] = None
+        weight_col: Optional[str] = None,
+        cv_seeds: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         """
         执行防过拟合优化（使用纯交叉验证）
@@ -172,6 +173,10 @@ class AntiOverfittingTuner(HyperparameterTuner):
             n_jobs: 并行数
             show_progress_bar: 是否显示进度条
             weight_col: 权重列名，如果传入则使用该列作为样本权重
+            cv_seeds: 交叉验证随机种子列表，如 [42, 7, 2024]。
+                传入多个seed时，每个trial会在多套不同的CV划分上重复评估并取平均，
+                可降低超参数对单一划分的过拟合（adaptive overfitting），
+                代价是训练耗时约乘以 len(cv_seeds)。默认为 [42]（单划分，与旧行为一致）。
 
         Returns:
             优化结果字典
@@ -198,12 +203,20 @@ class AntiOverfittingTuner(HyperparameterTuner):
         else:
             sample_weight = None
 
-        # 设置交叉验证
-        if is_classification:
-            cv_splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
-        else:
-            from sklearn.model_selection import KFold
-            cv_splitter = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+        # 设置交叉验证：支持多 seed 重复CV，每个 seed 生成一套独立划分
+        if cv_seeds is None:
+            cv_seeds = [42]
+        cv_splitters = []
+        for seed in cv_seeds:
+            if is_classification:
+                cv_splitters.append(
+                    (seed, StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed))
+                )
+            else:
+                from sklearn.model_selection import KFold
+                cv_splitters.append(
+                    (seed, KFold(n_splits=cv_folds, shuffle=True, random_state=seed))
+                )
 
         def objective(trial):
             try:
@@ -218,8 +231,14 @@ class AntiOverfittingTuner(HyperparameterTuner):
                 train_kss = []
                 val_kss = []
 
-                # 交叉验证
-                for fold_idx, (train_idx, val_idx) in enumerate(cv_splitter.split(X, y)):
+                # 交叉验证（多seed重复CV）：将 seed×fold 组合展平为统一序列，
+                # fold_idx 同时作为剪枝器上报的 step
+                splits = []
+                for seed, cv_splitter in cv_splitters:
+                    for train_idx, val_idx in cv_splitter.split(X, y):
+                        splits.append((seed, train_idx, val_idx))
+
+                for fold_idx, (seed, train_idx, val_idx) in enumerate(splits):
                     # 获取训练和验证数据
                     if isinstance(X, pd.DataFrame):
                         X_train_fold = X.iloc[train_idx]
@@ -241,8 +260,11 @@ class AntiOverfittingTuner(HyperparameterTuner):
                     else:
                         weight_train_fold = None
 
-                    # 训练模型
-                    model = self.model_class(**params)
+                    # 训练模型（模型随机种子跟随当前CV seed，避免划分与模型初始化双重固定）
+                    model_params = params.copy()
+                    if 'random_state' in model_params:
+                        model_params['random_state'] = seed
+                    model = self.model_class(**model_params)
                     model.fit(X_train_fold, y_train_fold, sample_weight=weight_train_fold)
 
                     # 预测
@@ -298,6 +320,7 @@ class AntiOverfittingTuner(HyperparameterTuner):
                 performance_record = {
                     'trial': trial.number,
                     'params': params.copy(),
+                    'n_cv_seeds': len(cv_seeds),
                     'train_score': avg_train_score,
                     'val_score': avg_val_score,
                     'final_score': final_score,

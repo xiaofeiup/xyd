@@ -47,9 +47,11 @@ class LightGBMSpace(ParameterSpace):
 
         # 树结构参数：使用固定分布范围，避免依赖其它已采样参数而产生
         # “动态分布”（会触发 Optuna 警告并削弱 TPE 建模）。
-        # num_leaves < 2^max_depth 的硬约束在采样后由 get_constraints() 统一裁剪。
+        # num_leaves 的上限直接由已采样的 max_depth 决定（LightGBM 要求 num_leaves < 2^max_depth），
+        # 让 Optuna 感知真实的条件分布，避免"采样后裁剪"导致边界值（如7）被过度堆积、
+        # 小叶子区域（4~6）几乎探索不到的问题。
         max_depth = trial.suggest_int('max_depth', 3, 8)
-        num_leaves = trial.suggest_int('num_leaves', 4, 255)
+        num_leaves = trial.suggest_int('num_leaves', 4, 2 ** max_depth - 1)
 
         # 学习率与迭代次数均使用固定范围；二者的软平衡关系交由 TPE 学习，
         # 硬性下限由 get_constraints() 中的约束函数处理。
