@@ -18,12 +18,15 @@ from sklearn.linear_model import LogisticRegression
 def filter_features_by_single_value_ratio(
     data: pd.DataFrame,
     threshold: float = 0.95,
-    exclude_cols: Optional[List[str]] = None
+    exclude_cols: Optional[List[str]] = None,
+    single_value_exclude_na: bool = True
 ) -> Tuple[List[str], pd.DataFrame]:
     """
     基于单一值占比筛选特征（优化版本：使用向量化操作）
 
-    如果某个特征的最频繁值（包含空值）占总数据量的比例超过阈值，则去掉该特征
+    如果某个特征的最频繁值占总数据量的比例超过阈值，则去掉该特征。
+    single_value_exclude_na=True（默认）时最频繁值只在非空取值中统计，
+    空值占比不影响该指标；设为 False 则空值参与统计（旧行为）。
 
     Parameters:
     -----------
@@ -50,12 +53,12 @@ def filter_features_by_single_value_ratio(
     filter_results = []
     
     for col in check_cols:
-        # 计算每个值的频次（包括NaN）
-        value_counts = data[col].value_counts(dropna=False)
-        
+        # 计算每个值的频次（single_value_exclude_na=True 时排除 NaN）
+        value_counts = data[col].value_counts(dropna=single_value_exclude_na)
+
         if len(value_counts) == 0:
-            # 空列
-            max_ratio = 1.0
+            # 空列（或排除空值后的全空列）：占比记 0，缺失问题由调用方另行检查
+            max_ratio = 0.0 if single_value_exclude_na else 1.0
             most_frequent_value = None
             reason = "空列"
             keep_feature = False
@@ -301,16 +304,21 @@ def _evaluate_feature_quality_binary(
     psi_min_sample: int,
     invalid_psi_policy: str,
     calculate_metrics_for_rejected: bool,
+    single_value_exclude_na: bool = True,
 ) -> Dict[str, Union[str, int, float, bool, object]]:
     """使用已校验的参数评估单个特征。"""
     sample_count = len(feature_series)
     missing_count = int(feature_series.isna().sum())
     missing_ratio = missing_count / sample_count if sample_count else 1.0
 
-    value_counts = feature_series.value_counts(dropna=False)
+    # single_value_exclude_na=True 时，最频繁值只在非空取值中统计：
+    # most_frequent_value 返回"最频繁的非空取值"，max_value_ratio 衡量
+    # 非空值的主导程度（分母仍为总样本量），空值问题由 missing_ratio 单独把关。
+    value_counts = feature_series.value_counts(dropna=single_value_exclude_na)
     if value_counts.empty:
         most_frequent_value = None
-        max_value_ratio = 1.0
+        # 全空列：排除空值时不存在主导值，占比记 0，交由缺失率阈值剔除
+        max_value_ratio = 0.0 if single_value_exclude_na else 1.0
         unique_count = 0
     else:
         most_frequent_value = value_counts.index[0]
@@ -389,6 +397,7 @@ def evaluate_feature_quality(
     iv_threshold: float = 0.02,
     iv_bins: int = 10,
     positive_label: Union[str, int, float] = 1,
+    single_value_exclude_na: bool = True,
 ) -> Dict[str, Union[str, int, float, bool, object]]:
     """按缺失率、单一值占比和 IV 评估单个特征。
 
@@ -419,6 +428,7 @@ def evaluate_feature_quality(
         psi_min_sample=10,
         invalid_psi_policy="drop",
         calculate_metrics_for_rejected=False,
+        single_value_exclude_na=single_value_exclude_na,
     )
 
 
@@ -439,12 +449,18 @@ def filter_features_by_quality(
     positive_label: Union[str, int, float] = 1,
     invalid_psi_policy: str = "drop",
     calculate_metrics_for_rejected: bool = False,
+    single_value_exclude_na: bool = True,
 ) -> Tuple[List[str], pd.DataFrame]:
     """按缺失率、单一值占比、IV 和时间分块 PSI 筛选特征。
 
     数据按 ``time_col`` 升序切成 ``time_blocks`` 个等样本量时间块。
     第 1 块为基准，依次与第 2 至第 N 块计算 PSI；任一次 PSI
     达到 ``psi_threshold`` 都会剔除该特征。未设置时间参数时跳过 PSI。
+
+    ``single_value_exclude_na=True``（默认）时，单一值占比统计排除空值：
+    ``most_frequent_value`` 为最频繁的非空取值，``max_value_ratio`` 只反映
+    非空取值的主导程度，空值占比由 ``missing_threshold`` 单独把关。
+    设为 False 则恢复旧行为（空值参与最频繁值统计）。
     """
     if not isinstance(data, pd.DataFrame):
         raise TypeError("data 必须是 pandas.DataFrame")
@@ -501,6 +517,7 @@ def filter_features_by_quality(
             psi_min_sample=psi_min_sample,
             invalid_psi_policy=invalid_psi_policy,
             calculate_metrics_for_rejected=calculate_metrics_for_rejected,
+            single_value_exclude_na=single_value_exclude_na,
         ))
 
     columns = [
@@ -535,6 +552,7 @@ class FeatureQualitySelector:
         exclude_cols: Optional[List[str]] = None,
         invalid_psi_policy: str = "drop",
         calculate_metrics_for_rejected: bool = False,
+        single_value_exclude_na: bool = True,
     ):
         _validate_quality_parameters(
             missing_threshold, single_value_threshold, iv_threshold, iv_bins,
@@ -560,6 +578,7 @@ class FeatureQualitySelector:
         self.exclude_cols = exclude_cols or []
         self.invalid_psi_policy = invalid_psi_policy
         self.calculate_metrics_for_rejected = calculate_metrics_for_rejected
+        self.single_value_exclude_na = single_value_exclude_na
         self.selected_features_: Optional[List[str]] = None
         self.selection_log_: Optional[pd.DataFrame] = None
         self.psi_log_: Optional[pd.DataFrame] = None
@@ -588,6 +607,7 @@ class FeatureQualitySelector:
             positive_label=self.positive_label,
             invalid_psi_policy=self.invalid_psi_policy,
             calculate_metrics_for_rejected=self.calculate_metrics_for_rejected,
+            single_value_exclude_na=self.single_value_exclude_na,
         )
         self.feature_scores_ = dict(
             zip(self.selection_log_["feature"], self.selection_log_["iv"])
